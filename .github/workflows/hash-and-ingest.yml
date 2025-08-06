@@ -17,7 +17,7 @@ jobs:
         shell: pwsh
         run: |
           $folderPath = "C:\asif pala\samples"
-          $outputCsv = "C:\asif pala\output\test.csv"
+          $outputCsv = "C:\asif pala\output\testing.csv"
           $hashResults = @()
           Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
               try {
@@ -39,4 +39,4 @@ jobs:
 
       - name: Ingest with Logstash
         run: |
-          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\your-config-file.conf"
+          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\sample.conf"
