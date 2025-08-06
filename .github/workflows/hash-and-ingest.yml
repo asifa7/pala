@@ -1,0 +1,42 @@
+name: Hash and Ingest to Elasticsearch
+
+on:
+  workflow_dispatch:   # Allows manual trigger from Actions tab
+  # schedule:          # Uncomment to run on a regular basis
+  #   - cron: '0 4 * * *' # Runs every day at 4:00 AM UTC
+
+jobs:
+  hash-and-ingest:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Code (if needed)
+        uses: actions/checkout@v4
+
+      - name: Generate SHA256 CSV
+        shell: pwsh
+        run: |
+          $folderPath = "C:\asif pala\samples"
+          $outputCsv = "C:\asif pala\output\test.csv"
+          $hashResults = @()
+          Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
+              try {
+                  $fileHash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
+                  $obj = [PSCustomObject]@{
+                      FileName = $_.Name
+                      FullPath = $_.FullName
+                      SHA256   = $fileHash.Hash
+                  }
+                  $hashResults += $obj
+                  Write-Host "Hashed: $($_.FullName)"
+              }
+              catch {
+                  Write-Warning "Failed to hash $($_.FullName): $_"
+              }
+          }
+          $hashResults | Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
+          Write-Host "`nSHA-256 hashes generated and saved to:`n$outputCsv"
+
+      - name: Ingest with Logstash
+        run: |
+          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\your-config-file.conf"
