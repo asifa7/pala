@@ -36,8 +36,6 @@ jobs:
           }
           $hashResults | Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
           Write-Host "`nSHA-256 hashes generated and saved to:`n$outputCsv"
-
       - name: Ingest with Logstash
-        shell: cmd
         run: |
           "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\sample.conf"
