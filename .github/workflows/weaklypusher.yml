@@ -2,8 +2,9 @@ name: Hash and Ingest to Elasticsearch
 
 on:
   #workflow_dispatch:   # Manual trigger from Actions tab
-  schedule:           # Auto-run weekly, Monday 4:00 AM UTC
-    - cron: '*/2 * * * *' #'0 4 * * 1'
+    schedule:
+    - cron: '*/15 * * * *'  # every 15 minutes
+
 
 jobs:
   hash-and-ingest:
