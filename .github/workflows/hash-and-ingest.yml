@@ -17,7 +17,11 @@ jobs:
         shell: powershell
         run: |
           $folderPath = "C:\asif pala\samples"
-          $outputCsv = "C:\asif pala\output\testing2.csv"
+          $timestamp = Get-Date -Format "yyyy-MM-dd"
+          $outputCsv = "C:\\asif pala\\output\\testing_$timestamp.csv"
+# Generate CSV hash file saved as $outputCsv
+
+          #$outputCsv = "C:\asif pala\output\testing2.csv"
           $hashResults = @()
           Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
               try {
