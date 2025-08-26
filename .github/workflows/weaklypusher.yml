@@ -17,7 +17,7 @@ jobs:
         shell: powershell
         run: |
           $folderPath = "C:\\asif pala\\samples"
-          $timestamp = Get-Date -Format "yyyy-MM-dd"
+          $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
           $outputCsv = "C:\\asif pala\\output\\testing_$timestamp.csv"
 
           $hashResults = @()
