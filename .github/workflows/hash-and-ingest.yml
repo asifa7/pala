@@ -1,27 +1,25 @@
 name: Hash and Ingest to Elasticsearch
 
 on:
-  workflow_dispatch:   # Allows manual trigger from Actions tab
-  # schedule:          # Uncomment to run on a regular basis
-  #   - cron: '0 4 * * *' # Runs every day at 4:00 AM UTC
+  workflow_dispatch:   # Manual trigger from Actions tab
+  schedule:           # Auto-run weekly, Monday 4:00 AM UTC
+    - cron: '0 4 * * 1'
 
 jobs:
   hash-and-ingest:
     runs-on: self-hosted
-
     steps:
       - name: Checkout Code (if needed)
         uses: actions/checkout@v4
 
       - name: Generate SHA256 CSV
+        id: generate_hash
         shell: powershell
         run: |
-          $folderPath = "C:\asif pala\samples"
+          $folderPath = "C:\\asif pala\\samples"
           $timestamp = Get-Date -Format "yyyy-MM-dd"
           $outputCsv = "C:\\asif pala\\output\\testing_$timestamp.csv"
-# Generate CSV hash file saved as $outputCsv
 
-          #$outputCsv = "C:\asif pala\output\testing2.csv"
           $hashResults = @()
           Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
               try {
@@ -40,6 +38,16 @@ jobs:
           }
           $hashResults | Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
           Write-Host "`nSHA-256 hashes generated and saved to:`n$outputCsv"
+
+          # Set outputs for use in next step
+          Write-Host "::set-output name=timestamp::$timestamp"
+          Write-Host "::set-output name=csv_path::$outputCsv"
+
       - name: Ingest with Logstash
+        env:
+          CSV_PATH: ${{ steps.generate_hash.outputs.csv_path }}
+          DATE: ${{ steps.generate_hash.outputs.timestamp }}
         run: |
-          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\sample.conf"
+          "C:\\asif pala\\logstash-9.1.0-windows-x86_64\\logstash-9.1.0\\bin\\logstash.bat" -f "C:\\asif pala\\logstash-9.1.0-windows-x86_64\\logstash-9.1.0\\config\\sample.conf"
+
+      # Optional: Add step here to update and start Elasticsearch Transform if needed
