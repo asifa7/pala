@@ -1,0 +1,46 @@
+name: Weekly Hash and Push
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'  # Every Sunday at 03:00 UTC
+
+jobs:
+  generate-and-push:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate SHA256 CSV
+        id: genhash
+        shell: powershell
+        run: |
+          $folderPath = "C:\asif pala\samples"
+          $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+          $outputCsv = "C:\asif pala\output\filehashes_$timestamp.csv"
+          $hashResults = @()
+          Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
+            try {
+              $fileHash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
+              $obj = [PSCustomObject]@{
+                  FileName = $_.Name
+                  FullPath = $_.FullName
+                  SHA256 = $fileHash.Hash
+                  Timestamp = $timestamp
+              }
+              $hashResults += $obj
+              Write-Host "Hashed: $($_.FullName)"
+            } catch {
+              Write-Warning "Failed to hash $($_.FullName): $_"
+            }
+          }
+          $hashResults | Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
+          Write-Host "Hash CSV created at $outputCsv"
+          "timestamp=$timestamp" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "csv_path=$outputCsv" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Push hashes to Elasticsearch with Logstash
+        env:
+          CSV_PATH: ${{ steps.genhash.outputs.csv_path }}
+        run: |
+          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\weeklypush.conf"
