@@ -1,9 +1,9 @@
 name: Hash and Ingest to Elasticsearch
 
 on:
-  #workflow_dispatch:   # Manual trigger from Actions tab
-    schedule:
-    - cron: '*/15 * * * *'  # every 15 minutes
+  workflow_dispatch:   # Manual trigger from Actions tab
+    # schedule:
+    # - cron: '*/15 * * * *'  # every 15 minutes
 
 
 jobs:
