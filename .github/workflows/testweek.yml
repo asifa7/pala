@@ -1,48 +1,48 @@
-name: Weekly Hash and Push
-on:
-  workflow_dispatch:    # Enables manual trigger
-  # schedule:
-  #   - cron: '0 3 * * 0'  # Uncomment to schedule every Sunday at 03:00 UTC
+name: Run File Hash Manual
 
+on:
+  workflow_dispatch: # Manual trigger via GitHub UI
+  # schedule:
+    # - cron: '*/15 * * * *'  # every 15 minutes
 jobs:
-  generate-and-push:
+  run-powershell-script:
     runs-on: self-hosted
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Generate SHA256 CSV
-        id: genhash
-        shell: powershell
+      - name: Run PowerShell Script
+        shell: Powershell
         run: |
-          $folderPath = "C:\asif pala\samples"
-          $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
-          $outputCsv = "C:\asif pala\output\filehashes_$timestamp.csv"
-          $hashResults = @()
-          Get-ChildItem -Path $folderPath -Recurse -File | ForEach-Object {
-            try {
-              $fileHash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
-              $obj = [PSCustomObject]@{
-                  FileName  = $_.Name
-                  FullPath  = $_.FullName
-                  SHA256    = $fileHash.Hash
-                  Timestamp = $timestamp
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          $username = "elastic"
+          $password = "mGUt6fo9Hj=V7saEVatU"
+          $pair = "$($username):$($password)"
+          $bytes = [System.Text.Encoding]::ASCII.GetBytes($pair)
+          $base64 = [Convert]::ToBase64String($bytes)
+          $headers = @{ Authorization = "Basic $base64" }
+
+          $folder =  "C:\\asif pala\\samples"
+          $indexName = "filehash-samples"
+          $esUri = "https://localhost:9200/$indexName/_doc"
+
+          $allFiles = Get-ChildItem -Path $folder -Recurse -File
+
+          foreach ($file in $allFiles) {
+              try {
+                  $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+                  $json = @{
+                      FileName = $file.Name
+                      FullPath = $file.FullName
+                      SHA256 = $hash.Hash
+                      LastWriteTime = $file.LastWriteTime.ToString("o")
+                      ScanTimestamp = (Get-Date).ToString("o")
+                  } | ConvertTo-Json -Depth 3
+
+                  Invoke-RestMethod -Uri $esUri -Method POST -Body $json -ContentType "application/json" -Headers $headers
+
+                  Write-Host "Sent to Elasticsearch: $($file.FullName)"
+              } catch {
+                  Write-Warning "Failed hashing or sending $($file.FullName): $_"
               }
-              $hashResults += $obj
-              Write-Host "Hashed: $($_.FullName)"
-            }
-            catch {
-              Write-Warning "Failed to hash $($_.FullName): $_"
-            }
           }
-          $hashResults | Export-Csv -Path $outputCsv -NoTypeInformation -Encoding UTF8
-          Write-Host "Hash CSV created at $outputCsv"
-          # Set outputs using the new environment files method
-          "timestamp=$timestamp" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "csv_path=$outputCsv" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Push hashes to Elasticsearch with Logstash
-        env:
-          CSV_PATH: ${{ steps.genhash.outputs.csv_path }}
-        run: |
-          "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\bin\logstash.bat" -f "C:\asif pala\logstash-9.1.0-windows-x86_64\logstash-9.1.0\config\weeklypush.conf"
