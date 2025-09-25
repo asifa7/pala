@@ -7,50 +7,60 @@ on:
 
 jobs:
   run-monitor:
-    runs-on: self-hosted           # Windows self-hosted runner
+    runs-on: self-hosted
     timeout-minutes: 240
 
     env:
-      # Configure scan targets (semicolon-separated for multiple paths)
       BASE_PATHS: C:\asif pala\samples
-
-      # Elasticsearch/Kibana
       ES_URL: https://localhost:9200
       ES_INDEX: file-monitor
       ES_USERNAME: elastic
       ES_PASSWORD: mGUt6fo9Hj=V7saEVatU
-      ES_VERIFY_CERTS: "false"      # keep false for local self-signed; set "true" for valid TLS
+      ES_VERIFY_CERTS: "false"
       ES_TIMEOUT: "60"
 
     steps:
-      - name: Install Python 3 via winget (user scope)
+      - name: Download Python 3.11 embeddable ZIP
         shell: cmd
         run: |
-          rem Install Python if missing; use winget in silent mode
-          winget install -e --id Python.Python.3 --source winget --silent --accept-package-agreements --accept-source-agreements
-          rem Locate the latest installed Python under user profile
-          for /f "delims=" %%A in ('dir /b /ad "%USERPROFILE%\AppData\Local\Programs\Python"') do set PYDIR=%%A
-          set PYROOT=%USERPROFILE%\AppData\Local\Programs\Python\%PYDIR%
-          if not exist "%PYROOT%\python.exe" (
-            echo Python installation not found at expected path: %PYROOT%
-            rem Try default 3.11 path as fallback
-            set PYROOT=%USERPROFILE%\AppData\Local\Programs\Python\Python311
-          )
-          if not exist "%PYROOT%\python.exe" (
-            echo FATAL: python.exe not found after winget install.
+          rem Use official Python embeddable distribution (no installer needed)
+          set PY_URL=https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip
+          echo Downloading %PY_URL%
+          bitsadmin /transfer pyembed /download /priority NORMAL %PY_URL% "%CD%\python-embed.zip" || powershell -Command ^
+            "(New-Object Net.WebClient).DownloadFile('%PY_URL%', 'python-embed.zip')"
+          if not exist python-embed.zip (
+            echo FATAL: python-embed.zip not downloaded
             exit /b 1
           )
-          echo PYROOT=%PYROOT%>> %GITHUB_ENV%
-          echo Adding Python to PATH for this job
-          echo %PYROOT%>> %GITHUB_PATH%
-          echo %PYROOT%\Scripts>> %GITHUB_PATH%
+
+      - name: Unpack Python and bootstrap pip
+        shell: cmd
+        run: |
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+            "Expand-Archive -LiteralPath 'python-embed.zip' -DestinationPath 'py' -Force"
+          if not exist py\python.exe (
+            echo FATAL: py\python.exe not found
+            dir /b py
+            exit /b 1
+          )
+          rem The embeddable package ships without pip; fetch get-pip.py
+          powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command ^
+            "(New-Object Net.WebClient).DownloadFile('https://bootstrap.pypa.io/get-pip.py', 'get-pip.py')"
+          rem Ensure site import enabled in python311._pth
+          (for /f "delims=" %%A in (py\python311._pth) do @echo %%A) > py\python311._pth.bak
+          (echo .) > py\python311._pth
+          (echo Lib\site-packages) >> py\python311._pth
+          (echo import site) >> py\python311._pth
+          rem Install pip into embeddable
+          py\python.exe get-pip.py
+          rem Add to PATH for this job
+          echo %CD%\py>> %GITHUB_PATH%
 
       - name: Verify Python
         shell: cmd
         run: |
           python --version
-          where python
-          python -c "print('hello from', __import__('sys').executable)"
+          python -c "import sys; print(sys.executable)"
 
       - name: Install dependencies
         shell: cmd
