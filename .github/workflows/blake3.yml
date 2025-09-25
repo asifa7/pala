@@ -7,7 +7,7 @@ on:
 
 jobs:
   run-monitor:
-    runs-on: self-hosted           # Windows self-hosted runner on the same PC
+    runs-on: self-hosted           # Windows self-hosted runner
     timeout-minutes: 240
 
     env:
@@ -23,21 +23,40 @@ jobs:
       ES_TIMEOUT: "60"
 
     steps:
-      - name: Show system Python
+      - name: Install Python 3 via winget (user scope)
         shell: cmd
         run: |
-          python --version || echo python not in PATH
-          where python || echo no python in PATH
-          py -0p || echo py launcher not available
+          rem Install Python if missing; use winget in silent mode
+          winget install -e --id Python.Python.3 --source winget --silent --accept-package-agreements --accept-source-agreements
+          rem Locate the latest installed Python under user profile
+          for /f "delims=" %%A in ('dir /b /ad "%USERPROFILE%\AppData\Local\Programs\Python"') do set PYDIR=%%A
+          set PYROOT=%USERPROFILE%\AppData\Local\Programs\Python\%PYDIR%
+          if not exist "%PYROOT%\python.exe" (
+            echo Python installation not found at expected path: %PYROOT%
+            rem Try default 3.11 path as fallback
+            set PYROOT=%USERPROFILE%\AppData\Local\Programs\Python\Python311
+          )
+          if not exist "%PYROOT%\python.exe" (
+            echo FATAL: python.exe not found after winget install.
+            exit /b 1
+          )
+          echo PYROOT=%PYROOT%>> %GITHUB_ENV%
+          echo Adding Python to PATH for this job
+          echo %PYROOT%>> %GITHUB_PATH%
+          echo %PYROOT%\Scripts>> %GITHUB_PATH%
 
-      - name: Install dependencies with system Python
+      - name: Verify Python
         shell: cmd
         run: |
-          where python >NUL 2>NUL
-          if %ERRORLEVEL%==0 (set PYCMD=python) else (set PYCMD=py -3)
-          echo Using Python command: %PYCMD%
-          %PYCMD% -m pip install --upgrade pip
-          %PYCMD% -m pip install blake3 "elasticsearch>=8.12.0"
+          python --version
+          where python
+          python -c "print('hello from', __import__('sys').executable)"
+
+      - name: Install dependencies
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install blake3 "elasticsearch>=8.12.0"
 
       - name: Write inline Python script (via powershell.exe)
         shell: cmd
@@ -304,7 +323,7 @@ jobs:
                 if env_paths:
                     BASE_PATHS=[p.strip() for p in env_paths.split(';') if p.strip()]
                 else:
-                    BASE_PATHS=[r'C:\asif pala\samples']
+                    BASE_PATHS=[r'C:\\asif pala\\samples']
 
                 m=FileSystemMonitor(
                     base_paths=BASE_PATHS,
@@ -323,10 +342,7 @@ jobs:
       - name: Run monitor
         shell: cmd
         run: |
-          where python >NUL 2>NUL
-          if %ERRORLEVEL%==0 (set PYCMD=python) else (set PYCMD=py -3)
-          echo Using Python command: %PYCMD%
-          %PYCMD% monitor_inline.py
+          python monitor_inline.py
 
       - name: Upload CSV and logs
         uses: actions/upload-artifact@v4
