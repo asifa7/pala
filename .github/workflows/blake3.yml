@@ -1,0 +1,328 @@
+name: File Monitor (Inline Python, BLAKE3 → Elasticsearch)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "30 16 * * 0"   # Sundays 22:00 IST approx; adjust as needed
+
+jobs:
+  run-monitor:
+    runs-on: self-hosted           # Windows self-hosted runner on the same PC
+    timeout-minutes: 240
+
+    env:
+      # Configure scan targets (semicolon-separated for multiple paths)
+      BASE_PATHS: C:\asif pala\samples
+      # Elasticsearch/Kibana
+      ES_URL: https://localhost:9200
+      ES_INDEX: file-monitor
+      ES_USERNAME: elastic
+      ES_PASSWORD: mGUt6fo9Hj=V7saEVatU
+      ES_VERIFY_CERTS: "false"     # keep false for local self-signed; set "true" for valid TLS
+      ES_TIMEOUT: "60"
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install blake3 "elasticsearch>=8.12.0"
+
+      - name: Write inline Python script
+        shell: pwsh
+        run: |
+          @"
+          import os, time, csv, sqlite3, hashlib, platform, logging
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from collections import defaultdict
+          from typing import Dict, List, Optional
+
+          try:
+              import blake3
+              BLAKE3_AVAILABLE = True
+          except ImportError:
+              BLAKE3_AVAILABLE = False
+              print("Blake3 not available. Install with: pip install blake3")
+
+          try:
+              from elasticsearch import Elasticsearch
+              ELASTICSEARCH_AVAILABLE = True
+          except ImportError:
+              ELASTICSEARCH_AVAILABLE = False
+              print('Elasticsearch not available. Install with: pip install "elasticsearch>=8.12.0"')
+
+          class FileSystemMonitor:
+              def __init__(self, base_paths: List[str], db_path='file_monitor.db',
+                           kibana_url='http://localhost:9200', index_name='file-monitor',
+                           es_username='', es_password='', es_verify_certs=False, es_timeout=60):
+                  self.base_paths = base_paths
+                  self.db_path = db_path
+                  self.kibana_url = kibana_url
+                  self.index_name = index_name
+                  self.es_username = es_username
+                  self.es_password = es_password
+                  self.es_verify_certs = es_verify_certs
+                  self.es_timeout = es_timeout
+                  self.suspicious_extensions = {'.exe','.bat','.cmd','.scr','.pif','.com','.vbs','.js','.jar'}
+                  self._setup_db()
+                  self._setup_log()
+
+              def _setup_log(self):
+                  logging.basicConfig(level=logging.INFO,
+                                      format='%(asctime)s - %(levelname)s - %(message)s',
+                                      handlers=[logging.FileHandler('file_monitor.log'), logging.StreamHandler()])
+                  self.logger = logging.getLogger(__name__)
+
+              def _setup_db(self):
+                  conn = sqlite3.connect(self.db_path)
+                  cur = conn.cursor()
+                  cur.execute('''
+                    CREATE TABLE IF NOT EXISTS file_records (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      file_path TEXT UNIQUE,
+                      blake3_hash TEXT,
+                      file_size INTEGER,
+                      file_extension TEXT,
+                      last_modified TIMESTAMP,
+                      last_scanned TIMESTAMP,
+                      is_duplicate BOOLEAN DEFAULT 0,
+                      duplicate_group_id TEXT,
+                      previous_location TEXT,
+                      is_corrupted BOOLEAN DEFAULT 0,
+                      is_suspicious BOOLEAN DEFAULT 0,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                  ''')
+                  cur.execute('''
+                    CREATE TABLE IF NOT EXISTS scan_history (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      scan_timestamp TIMESTAMP,
+                      files_scanned INTEGER,
+                      duplicates_found INTEGER,
+                      corrupted_files INTEGER,
+                      suspicious_files INTEGER,
+                      total_size_bytes INTEGER
+                    )
+                  ''')
+                  conn.commit(); conn.close()
+
+              def _b3(self, path:str)->Optional[str]:
+                  if not BLAKE3_AVAILABLE: return None
+                  try:
+                      h = blake3.blake3()
+                      with open(path,'rb') as f:
+                          for chunk in iter(lambda:f.read(8192), b''):
+                              h.update(chunk)
+                      return h.hexdigest()
+                  except Exception as e:
+                      self.logger.error(f'Hash error {path}: {e}')
+                      return None
+
+              def _corrupt(self, path:str, expected:str=None)->bool:
+                  try:
+                      with open(path,'rb') as f: f.read(1024)
+                      if expected:
+                          return self._b3(path) != expected
+                      return False
+                  except Exception as e:
+                      self.logger.warning(f'Possible corruption {path}: {e}')
+                      return True
+
+              def _suspicious(self, path:str, st)->Dict:
+                  out={'is_suspicious':False,'reasons':[]}
+                  ext=Path(path).suffix.lower()
+                  if ext in self.suspicious_extensions:
+                      out['is_suspicious']=True; out['reasons'].append(f'Suspicious extension: {ext}')
+                  if time.time()-st.st_ctime < 3600:
+                      out['reasons'].append('Recently created file')
+                  if st.st_size>100*1024*1024 and ext in {'.txt','.log','.cfg'}:
+                      out['is_suspicious']=True; out['reasons'].append('Unusually large text file')
+                  if platform.system()=='Windows':
+                      sys_dirs=[r'C:\Windows', r'C:\Program Files']
+                  else:
+                      sys_dirs=['/usr','/bin','/sbin']
+                  for d in sys_dirs:
+                      if path.startswith(d) and Path(path).name.startswith('.'):
+                          out['is_suspicious']=True; out['reasons'].append('Hidden file in system directory'); break
+                  return out
+
+              def scan_dir(self, rootdir:str)->List[Dict]:
+                  rec=[]
+                  for root,dirs,files in os.walk(rootdir):
+                      for name in files:
+                          p=os.path.join(root,name)
+                          try:
+                              st=os.stat(p); ext=Path(p).suffix.lower()
+                              h=self._b3(p)
+                              if not h: continue
+                              rec.append({
+                                'file_path':p,
+                                'blake3_hash':h,
+                                'file_size':st.st_size,
+                                'file_extension':ext,
+                                'last_modified': datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                                'last_scanned': datetime.now(tz=timezone.utc).isoformat(),
+                                'is_corrupted': self._corrupt(p),
+                                **self._suspicious(p,st),
+                                'folder_depth': len(Path(p).parts)-len(Path(rootdir).parts),
+                                'parent_folder': str(Path(p).parent),
+                              })
+                              if len(rec)%1000==0: self.logger.info(f'Scanned {len(rec)} files...')
+                          except Exception as e:
+                              self.logger.warning(f'Access error {p}: {e}')
+                  return rec
+
+              def find_dupes(self, recs:List[Dict])->Dict[str,List[Dict]]:
+                  g=defaultdict(list)
+                  for r in recs:
+                      if r['blake3_hash']: g[r['blake3_hash']].append(r)
+                  d={k:v for k,v in g.items() if len(v)>1}
+                  for k,files in d.items():
+                      for r in files:
+                          r['is_duplicate']=True; r['duplicate_group_id']=k; r['duplicate_count']=len(files)
+                  return d
+
+              def moved(self, recs:List[Dict])->List[Dict]:
+                  moved=[]
+                  conn=sqlite3.connect(self.db_path); cur=conn.cursor()
+                  cur.execute('SELECT file_path, blake3_hash FROM file_records')
+                  before={h:p for (p,h) in cur.fetchall()}
+                  conn.close()
+                  for r in recs:
+                      h=r['blake3_hash']; p=r['file_path']
+                      if h in before and before[h]!=p:
+                          moved.append({'blake3_hash':h,'old_location':before[h],'new_location':p,'moved_at':datetime.now(tz=timezone.utc).isoformat()})
+                  return moved
+
+              def persist(self, recs:List[Dict], moved_files:List[Dict]):
+                  conn=sqlite3.connect(self.db_path); cur=conn.cursor()
+                  cur.execute('DELETE FROM file_records')
+                  for r in recs:
+                      cur.execute('''
+                        INSERT INTO file_records (file_path, blake3_hash, file_size, file_extension, last_modified,
+                          last_scanned, is_duplicate, duplicate_group_id, is_corrupted, is_suspicious)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      ''',(r['file_path'],r['blake3_hash'],r['file_size'],r['file_extension'],r['last_modified'],
+                           r['last_scanned'],r.get('is_duplicate',False),r.get('duplicate_group_id'),r['is_corrupted'],r['is_suspicious']))
+                  dupes=sum(1 for r in recs if r.get('is_duplicate')); corr=sum(1 for r in recs if r['is_corrupted'])
+                  susp=sum(1 for r in recs if r['is_suspicious']); total=sum(r['file_size'] for r in recs)
+                  cur.execute('INSERT INTO scan_history (scan_timestamp, files_scanned, duplicates_found, corrupted_files, suspicious_files, total_size_bytes) VALUES (?, ?, ?, ?, ?, ?)',
+                              (datetime.now(tz=timezone.utc).isoformat(), len(recs), dupes, corr, susp, total))
+                  conn.commit(); conn.close()
+
+              def _connect_es(self):
+                  if not ELASTICSEARCH_AVAILABLE: return None
+                  url=self.kibana_url
+                  try:
+                      es=Elasticsearch(url,
+                          basic_auth=(self.es_username,self.es_password) if self.es_username else None,
+                          verify_certs=self.es_verify_certs,
+                          request_timeout=self.es_timeout,
+                          headers={
+                            "Accept":"application/vnd.elasticsearch+json; compatible-with=7",
+                            "Content-Type":"application/vnd.elasticsearch+json; compatible-with=7",
+                          })
+                      es.info()
+                      try:
+                          if not es.indices.exists(index=self.index_name):
+                              es.indices.create(index=self.index_name)
+                      except Exception: pass
+                      return es
+                  except Exception as e:
+                      self.logger.warning(f'Elasticsearch not reachable: {e}. Skipping upload.')
+                      return None
+
+              def _safe_index(self, es, doc):
+                  for i in range(5):
+                      try:
+                          es.index(index=self.index_name, document=doc); return True
+                      except Exception as e:
+                          self.logger.warning(f'Index attempt {i+1} failed: {e}'); time.sleep(2*(i+1))
+                  self.logger.error('ES indexing failed after retries'); return False
+
+              def send(self, recs:List[Dict], moved_files:List[Dict], dupes:Dict):
+                  es=self._connect_es()
+                  if not es: return
+                  bs=200; sent=0
+                  for i in range(0,len(recs),bs):
+                      for r in recs[i:i+bs]:
+                          doc={"@timestamp":r["last_scanned"],"event_type":"file_scan",**r}
+                          self._safe_index(es,doc); sent+=1
+                      self.logger.info(f'Sent {sent} docs...')
+                  for m in moved_files:
+                      self._safe_index(es,{"@timestamp":m["moved_at"],"event_type":"file_moved",**m})
+                  if dupes:
+                      summary={"@timestamp":datetime.now(tz=timezone.utc).isoformat(),"event_type":"duplicate_summary",
+                               "duplicate_groups":len(dupes),"total_duplicates":sum(len(v) for v in dupes.values()),
+                               "duplicate_details":[{"hash":k,"file_count":len(v),"file_paths":[r["file_path"] for r in v],
+                                                     "total_size":sum(r["file_size"] for r in v)} for k,v in dupes.items()]}
+                      self._safe_index(es,summary)
+
+              def export_csv(self, recs:List[Dict], moved_files:List[Dict]):
+                  ts=datetime.now().strftime('%Y%m%d_%H%M%S')
+                  if recs:
+                      with open(f'file_scan_{ts}.csv','w',newline='',encoding='utf-8') as f:
+                          w=csv.DictWriter(f, fieldnames=list(recs[0].keys())); w.writeheader(); w.writerows(recs)
+                  if moved_files:
+                      with open(f'moved_files_{ts}.csv','w',newline='',encoding='utf-8') as f:
+                          w=csv.DictWriter(f, fieldnames=list(moved_files[0].keys())); w.writeheader(); w.writerows(moved_files)
+
+              def run(self):
+                  self.logger.info('Starting full file system scan...')
+                  start=time.time(); allrecs=[]
+                  for p in self.base_paths:
+                      if os.path.exists(p):
+                          self.logger.info(f'Scanning: {p}')
+                          allrecs.extend(self.scan_dir(p))
+                      else:
+                          self.logger.warning(f'Path does not exist: {p}')
+                  self.logger.info(f'Scanned {len(allrecs)} files')
+                  dupes=self.find_dupes(allrecs); self.logger.info(f'Found {len(dupes)} duplicate groups')
+                  moved=self.moved(allrecs); self.logger.info(f'Detected {len(moved)} moved files')
+                  self.persist(allrecs,moved); self.send(allrecs,moved,dupes); self.export_csv(allrecs,moved)
+                  corr=sum(1 for r in allrecs if r['is_corrupted']); susp=sum(1 for r in allrecs if r['is_suspicious'])
+                  print('\\n=== SCAN SUMMARY ==='); print(f'Total files scanned: {len(allrecs)}'); print(f'Duplicate groups found: {len(dupes)}')
+                  print(f'Files moved: {len(moved)}'); print(f'Corrupted files: {corr}'); print(f'Suspicious files: {susp}')
+                  print(f'Total size: {sum(r["file_size"] for r in allrecs)/(1024*1024*1024):.2f} GB'); print(f'Scan time: {(time.time()-start)/60:.2f} minutes')
+
+          if __name__=='__main__':
+              # Support semicolon-separated env paths on Windows
+              env_paths=os.getenv('BASE_PATHS','')
+              if env_paths:
+                  BASE_PATHS=[p.strip() for p in env_paths.split(';') if p.strip()]
+              else:
+                  BASE_PATHS=[r'C:\asif pala\samples']
+
+              m=FileSystemMonitor(
+                  base_paths=BASE_PATHS,
+                  db_path='file_monitor.db',
+                  kibana_url=os.getenv('ES_URL','http://localhost:9200'),
+                  index_name=os.getenv('ES_INDEX','file-monitor'),
+                  es_username=os.getenv('ES_USERNAME','elastic'),
+                  es_password=os.getenv('ES_PASSWORD','mGUt6fo9Hj=V7saEVatU'),
+                  es_verify_certs=(os.getenv('ES_VERIFY_CERTS','false').lower()=='true'),
+                  es_timeout=int(os.getenv('ES_TIMEOUT','60')),
+              )
+              m.run()
+          "@ | Set-Content -LiteralPath monitor_inline.py -Encoding UTF8
+
+      - name: Run monitor
+        shell: pwsh
+        run: |
+          python monitor_inline.py
+
+      - name: Upload CSV and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-output
+          path: |
+            **/file_scan_*.csv
+            **/moved_files_*.csv
+            **/file_monitor.log
+          if-no-files-found: warn
