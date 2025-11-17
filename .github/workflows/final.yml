@@ -12,8 +12,6 @@ jobs:
       KIBANA_URL: 'http://localhost:5601'
       ES_USERNAME: 'elastic'
       ES_PASSWORD: '_3Ixrn+I=N6pu_C1IzjW'
-      ELASTIC_HOME: 'C:\asif pala\elasticsearch-9.1.0'
-      KIBANA_HOME: 'C:\asif pala\kibana-9.1.0-windows-x86_64'
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
@@ -22,37 +20,57 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Disable TLS validation globally (job-wide)
+      - name: Disable TLS validation globally (optional)
         shell: powershell
         run: |
-          # disable TLS cert checks for this job (dev/local use only)
           [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-          Write-Host "TLS certificate validation disabled for this job."
+          Write-Host "TLS validation disabled for job."
 
-      - name: Start Elasticsearch (detached)
+      - name: Find Elasticsearch and Kibana batch files (search & report)
         shell: powershell
         run: |
-          $esBat = "${{ env.ELASTIC_HOME }}\bin\elasticsearch.bat"
-          if (-not (Test-Path $esBat)) {
-            Write-Error "Elasticsearch batch not found at $esBat"
-            exit 1
+          # prefer searching under C:\asif pala if present to speed up search
+          $searchRoot = 'C:\asif pala'
+          if (-not (Test-Path $searchRoot)) { $searchRoot = 'C:\' }
+
+          Write-Host "Searching for elasticsearch.bat and kibana.bat under: $searchRoot"
+          $esBatPath = Get-ChildItem -Path $searchRoot -Filter 'elasticsearch.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          $kibBatPath = Get-ChildItem -Path $searchRoot -Filter 'kibana.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+
+          Write-Host "elasticsearch.bat => $esBatPath"
+          Write-Host "kibana.bat       => $kibBatPath"
+
+          if (-not $esBatPath) { Write-Warning "elasticsearch.bat not found under $searchRoot" }
+          if (-not $kibBatPath) { Write-Warning "kibana.bat not found under $searchRoot" }
+
+          # Export to job environment file for later steps
+          if ($esBatPath) { "`nES_BAT=$esBatPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          if ($kibBatPath) { "`nKIB_BAT=$kibBatPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+
+      - name: Start Elasticsearch if found (detached)
+        shell: powershell
+        run: |
+          if (-not $env:ES_BAT) {
+            Write-Warning "ES batch path not set; skipping ES start step."
+            exit 0
           }
-          Write-Host "Starting Elasticsearch: $esBat"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$esBat`"" -WindowStyle Normal
-          Start-Sleep -Seconds 3
+          $esBat = $env:ES_BAT
+          Write-Host "Starting Elasticsearch from: $esBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$esBat`"" -WindowStyle Hidden
+          Start-Sleep -Seconds 4
           Write-Host "Elasticsearch start command issued."
 
-      - name: Start Kibana (detached)
+      - name: Start Kibana if found (detached)
         shell: powershell
         run: |
-          $kibBat = "${{ env.KIBANA_HOME }}\bin\kibana.bat"
-          if (-not (Test-Path $kibBat)) {
-            Write-Error "Kibana batch not found at $kibBat"
-            exit 1
+          if (-not $env:KIB_BAT) {
+            Write-Warning "Kibana batch path not set; skipping Kibana start step."
+            exit 0
           }
-          Write-Host "Starting Kibana: $kibBat"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$kibBat`"" -WindowStyle Normal
-          Start-Sleep -Seconds 3
+          $kibBat = $env:KIB_BAT
+          Write-Host "Starting Kibana from: $kibBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$kibBat`"" -WindowStyle Hidden
+          Start-Sleep -Seconds 4
           Write-Host "Kibana start command issued."
 
       - name: Poll for Elasticsearch & Kibana (verbose)
@@ -120,14 +138,10 @@ jobs:
 
       - name: Run FileSystemMonitor Python script
         shell: powershell
-        env:
-          ES_URL: ${{ env.ES_URL }}
-          ES_USERNAME: ${{ env.ES_USERNAME }}
-          ES_PASSWORD: ${{ env.ES_PASSWORD }}
         run: |
           $pyScript = "${{ env.PYTHON_SCRIPT }}"
           if (-not (Test-Path $pyScript)) {
-            Write-Error "Python script not found at $pyScript"
+            Write-Error "Python script not found at $pyScript; aborting."
             exit 1
           }
           Write-Host "Running Python script: $pyScript"
