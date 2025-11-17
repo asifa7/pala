@@ -13,7 +13,7 @@ jobs:
       ES_USERNAME: ${{ secrets.ES_USERNAME || 'elastic' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '_3Ixrn+I=N6pu_C1IzjW' }}
       TARGET_SCRIPT_DIR: 'C:\scripts'
-      TARGET_SCRIPT: 'C:\scripts\start-services.cmd'
+      TARGET_SCRIPT: 'C:\scripts\start-services.cmd.cmd'
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
