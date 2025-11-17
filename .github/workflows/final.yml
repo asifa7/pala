@@ -1,24 +1,20 @@
 name: Start ES/Kibana and run FileSystemMonitor
 
-# Manual trigger + you can trigger via API or other workflows
 on:
   workflow_dispatch:
 
 jobs:
   run-on-self-hosted-windows:
-    # MUST be a self-hosted Windows runner that runs on the same machine
     runs-on: [self-hosted, windows]
 
     env:
-      # Defaults — override via repository Secrets or workflow_dispatch inputs
       ES_URL: ${{ secrets.ES_URL || 'http://localhost:9200' }}
       KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || '' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '' }}
       START_SCRIPT: 'C:\scripts\start-services.cmd'
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
-      # Poll config
-      POLL_RETRIES: 24        # number of polls (24 * POLL_INTERVAL_SECONDS = total wait)
+      POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
 
     steps:
@@ -26,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate runner & paths
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Running on: $env:RUNNER_OS"
           if (-not (Test-Path $env:START_SCRIPT)) {
@@ -38,17 +34,17 @@ jobs:
           }
 
       - name: Launch start-services.cmd (detached)
-        shell: pwsh
+        shell: powershell
         run: |
           $script = $env:START_SCRIPT
           Write-Host "Launching services script: $script"
           # Start detached process so the job can continue and service windows remain
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal -NoNewWindow:$false -WorkingDirectory (Split-Path $script)
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal -WorkingDirectory (Split-Path $script)
           Start-Sleep -Seconds 2
           Write-Host "start-services.cmd launched."
 
       - name: Poll for Elasticsearch and Kibana readiness
-        shell: pwsh
+        shell: powershell
         run: |
           $esUrl = $env:ES_URL
           $kbUrl = $env:KIBANA_URL
@@ -73,7 +69,6 @@ jobs:
             }
 
             try {
-              # Kibana may return 302 to login or 200; treat any 2xx/3xx as up
               $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
               if (($kbResp.StatusCode -ge 200 -and $kbResp.StatusCode -lt 400)) {
                 $kbUp = $true
@@ -95,16 +90,16 @@ jobs:
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "Timed out waiting for ES/Kibana to be healthy. Proceeding anyway (you can change POLL_RETRIES/POLL_INTERVAL_SECONDS)."
+            Write-Warning "Timed out waiting for ES/Kibana to be healthy. Proceeding anyway."
           }
 
-      - name: Setup Python (required to run your script)
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
 
       - name: Install Python dependencies (optional)
-        shell: pwsh
+        shell: powershell
         run: |
           if (Test-Path "requirements.txt") {
             Write-Host "requirements.txt found — installing"
@@ -115,7 +110,7 @@ jobs:
           }
 
       - name: Run FileSystemMonitor Python script
-        shell: pwsh
+        shell: powershell
         env:
           ES_URL: ${{ env.ES_URL }}
           ES_USERNAME: ${{ env.ES_USERNAME }}
@@ -127,5 +122,4 @@ jobs:
             exit 1
           }
           Write-Host "Starting Python script: $pyScript"
-          # Run in same job so logs are captured by the workflow
           & python $pyScript
