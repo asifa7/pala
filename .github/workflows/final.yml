@@ -42,6 +42,52 @@ jobs:
           Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal -WorkingDirectory (Split-Path $script)
           Start-Sleep -Seconds 2
           Write-Host "start-services.cmd launched."
+                - name: Trust Elasticsearch TLS cert on runner (add to LocalMachine\Root)
+        shell: powershell
+        run: |
+          $esHost = 'localhost'
+          $esPort = 9200
+          $tmpCertPath = Join-Path $env:TEMP "es_local_cert.cer"
+
+          Write-Host "Attempting to fetch TLS cert from $esHost:$esPort ..."
+          try {
+            $tcp = New-Object System.Net.Sockets.TcpClient($esHost, $esPort)
+            $stream = $tcp.GetStream()
+            $ssl = New-Object System.Net.Security.SslStream($stream,$false,({$true}))
+            $ssl.AuthenticateAsClient($esHost)
+            $rawCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+            [System.IO.File]::WriteAllBytes($tmpCertPath, $rawCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            Write-Host "Saved certificate to $tmpCertPath"
+            $tcp.Close()
+          } catch {
+            Write-Warning "Failed to fetch certificate from $esHost:$esPort. Error: $($_.Exception.Message)"
+            exit 1
+          }
+
+          Write-Host "Installing cert into LocalMachine\Root ..."
+          try {
+            # Add cert to Trusted Root using certutil
+            certutil -addstore -f Root $tmpCertPath | Write-Host
+            Write-Host "Certificate installed to LocalMachine\Root"
+          } catch {
+            Write-Warning "certutil installation failed: $($_.Exception.Message)"
+            # Try using PowerShell X509Store as fallback
+            try {
+              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($tmpCertPath)
+              $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root","LocalMachine")
+              $store.Open("ReadWrite")
+              $store.Add($cert)
+              $store.Close()
+              Write-Host "Fallback: certificate added to LocalMachine\\Root via X509Store"
+            } catch {
+              Write-Error "Failed to add certificate to LocalMachine\\Root. You need admin privileges. Error: $($_.Exception.Message)"
+              exit 1
+            }
+          }
+
+          # Optional: remove the temp file
+          try { Remove-Item $tmpCertPath -Force } catch {}
+
 
       - name: Poll for Elasticsearch and Kibana readiness
         shell: powershell
