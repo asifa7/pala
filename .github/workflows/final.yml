@@ -22,7 +22,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure start-services.cmd is present (copy from repo if needed)
+      - name: Ensure start-services.cmd is present
         shell: powershell
         run: |
           $repo = $env:GITHUB_WORKSPACE
@@ -35,106 +35,61 @@ jobs:
             "$repo\start-services.cmd.cmd"
           )
 
-          Write-Host "Checking for target script at: $targetScript"
+          if (Test-Path $targetScript) { exit 0 }
 
-          if (Test-Path $targetScript) {
-            Write-Host "Found existing $targetScript on runner. Using that."
-            exit 0
-          }
-
-          $found = $false
           foreach ($p in $candidates) {
-            Write-Host "Checking repo candidate: $p"
             if (Test-Path $p) {
               if (-not (Test-Path $targetDir)) {
                 New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
               }
               Copy-Item -Path $p -Destination $targetScript -Force
-              Write-Host "Copied $p -> $targetScript"
-              $found = $true
-              break
+              exit 0
             }
           }
 
-          if (-not $found) {
-            Write-Error "start-services script not found anywhere. Place it in repo as scripts/start-services.cmd or start-services.cmd(.cmd)"
-            exit 1
-          }
+          Write-Error "start-services.cmd not found."; exit 1
 
-      - name: Validate Python script presence (warn only)
+      - name: Launch services script
         shell: powershell
         run: |
-          if (-not (Test-Path "${{ env.PYTHON_SCRIPT }}")) {
-            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Update PYTHON_SCRIPT or place file accordingly."
-          } else {
-            Write-Host "Python script found: ${{ env.PYTHON_SCRIPT }}"
-          }
-
-      - name: Launch start-services.cmd (detached)
-        shell: powershell
-        run: |
-          $script = "${{ env.TARGET_SCRIPT }}"
-          Write-Host "Launching services script: $script"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$env:TARGET_SCRIPT`""
           Start-Sleep -Seconds 2
-          Write-Host "Launched services script."
 
-      - name: Poll for Elasticsearch & Kibana (IGNORE TLS ERRORS)
+      - name: Poll for Elasticsearch & Kibana (TLS disabled)
         shell: powershell
         run: |
-          # Use a safe Add-Type here-string then disable TLS validation for this PS session (dev-only)
-          $certBypass = @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCerts {
-    public static bool Ignore(object sender, X509Certificate cert, X509Chain chain, System.Net.Security.SslPolicyErrors errors) {
-        return true;
-    }
-}
-"@
-          Add-Type -TypeDefinition $certBypass -ErrorAction SilentlyContinue
+          # Disable TLS certificate validation (safe for local/dev)
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-          # Disable certificate validation for this process (development/CI only)
-          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) return $true }
+          $esUrl = $env:ES_URL
+          $kbUrl = $env:KIBANA_URL
+          $retries = [int]$env:POLL_RETRIES
+          $interval = [int]$env:POLL_INTERVAL_SECONDS
 
-          $esUrl = '${{ env.ES_URL }}'
-          $kbUrl = '${{ env.KIBANA_URL }}'
-          $retries = [int]${{ env.POLL_RETRIES }}
-          $interval = [int]${{ env.POLL_INTERVAL_SECONDS }}
-
-          Write-Host "Polling ES & Kibana with TLS validation DISABLED..."
+          Write-Host "Checking ES and Kibana..."
 
           $esUp = $false
           $kbUp = $false
 
-          for ($i = 0; $i -lt $retries; $i++) {
+          for ($i=0; $i -lt $retries; $i++) {
+
             try {
-              $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "Elasticsearch responded: $($esResp.StatusCode)"
+              (Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10) | Out-Null
               $esUp = $true
-            } catch {
-              Write-Host "Elasticsearch not ready: $($_.Exception.Message)"
-            }
+            } catch {}
 
             try {
-              $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "Kibana responded: $($kbResp.StatusCode)"
+              (Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10) | Out-Null
               $kbUp = $true
-            } catch {
-              Write-Host "Kibana not ready: $($_.Exception.Message)"
-            }
+            } catch {}
 
-            if ($esUp -and $kbUp) {
-              Write-Host "Both services ready. Continuing."
-              break
-            }
+            if ($esUp -and $kbUp) { break }
 
-            Write-Host "Waiting $interval seconds before next check... ($($i+1)/$retries)"
             Start-Sleep -Seconds $interval
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "Timed out waiting for ES/Kibana — continuing anyway."
+            Write-Warning "ES/Kibana not fully ready — continuing anyway."
           }
 
       - name: Setup Python
@@ -142,27 +97,15 @@ public class TrustAllCerts {
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies (optional)
+      - name: Install dependencies (if any)
         shell: powershell
         run: |
           if (Test-Path "requirements.txt") {
             python -m pip install --upgrade pip
             python -m pip install -r requirements.txt
-          } else {
-            Write-Host "No requirements.txt present; skipping pip install step"
           }
 
-      - name: Run FileSystemMonitor Python script
+      - name: Run FileSystemMonitor
         shell: powershell
-        env:
-          ES_URL: ${{ env.ES_URL }}
-          ES_USERNAME: ${{ env.ES_USERNAME }}
-          ES_PASSWORD: ${{ env.ES_PASSWORD }}
         run: |
-          $pyScript = '${{ env.PYTHON_SCRIPT }}'
-          if (-not (Test-Path $pyScript)) {
-            Write-Error "Python script not found at $pyScript"
-            exit 1
-          }
-          Write-Host "Starting Python script: $pyScript"
-          & python $pyScript
+          python "${{ env.PYTHON_SCRIPT }}"
