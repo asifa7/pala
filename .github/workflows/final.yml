@@ -12,7 +12,7 @@ jobs:
       KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || '' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '' }}
-      START_SCRIPT: 'C:\scripts\start-services.cmd'
+      START_SCRIPT: 'C:\scripts\start-services.cmd.cmd'
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
