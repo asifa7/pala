@@ -73,11 +73,11 @@ jobs:
         run: |
           # Disable TLS validation for THIS PS session
           add-type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCerts {
-    public static bool Ignore(Object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
-        return true;
+          using System.Net;
+          using System.Security.Cryptography.X509Certificates;
+          public class TrustAllCerts {
+          public static bool Ignore(Object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
+          return true;
     }
 }
 "@
