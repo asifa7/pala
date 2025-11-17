@@ -9,16 +9,11 @@ jobs:
 
     env:
       ES_URL: ${{ secrets.ES_URL || 'https://localhost:9200' }}
-      KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
+      KIBANA_URL: ${{ secrets.KIBANA_URL || 'https://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || 'elastic' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '_3Ixrn+I=N6pu_C1IzjW' }}
-      # Where the workflow will copy the start script on the runner
       TARGET_SCRIPT_DIR: 'C:\scripts'
       TARGET_SCRIPT: 'C:\scripts\start-services.cmd'
-      # Where to look in the repo for the start script (try both common names)
-      REPO_SCRIPT_REL_1: 'scripts\start-services.cmd'
-      REPO_SCRIPT_REL_2: 'start-services.cmd'          # in repo root
-      REPO_SCRIPT_REL_3: 'start-services.cmd.cmd'     # accidental double extension
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
@@ -27,19 +22,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure start-services.cmd.cmd is present (copy from repo if needed)
+      - name: Ensure start-services.cmd is present (copy from repo if needed)
         shell: powershell
         run: |
+          $repo = $env:GITHUB_WORKSPACE
           $targetDir = "${{ env.TARGET_SCRIPT_DIR }}"
           $targetScript = "${{ env.TARGET_SCRIPT }}"
-          $repo = $env:GITHUB_WORKSPACE
+
+          # Candidates in repo (common places / accidental double extension)
           $candidates = @(
-            Join-Path $repo '${{ env.REPO_SCRIPT_REL_1 }}',
-            Join-Path $repo '${{ env.REPO_SCRIPT_REL_2 }}',
-            Join-Path $repo '${{ env.REPO_SCRIPT_REL_3 }}'
+            "$repo\scripts\start-services.cmd",
+            "$repo\start-services.cmd",
+            "$repo\start-services.cmd.cmd"
           )
 
           Write-Host "Checking for target script at: $targetScript"
+
           if (Test-Path $targetScript) {
             Write-Host "Found existing $targetScript on runner. Using that."
             exit 0
@@ -62,7 +60,7 @@ jobs:
           }
 
           if (-not $found) {
-            Write-Error "start-services script not found in repository. Place it at 'scripts/start-services.cmd.cmd' or 'start-services.cmd.cmd' (or rename existing)."
+            Write-Error "start-services script not found in repository. Place it at 'scripts/start-services.cmd' or at repo root."
             exit 1
           }
 
@@ -70,7 +68,7 @@ jobs:
         shell: powershell
         run: |
           if (-not (Test-Path "${{ env.PYTHON_SCRIPT }}")) {
-            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Make sure the file exists or update PYTHON_SCRIPT env var."
+            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Update PYTHON_SCRIPT or place file accordingly."
           } else {
             Write-Host "Python script found: ${{ env.PYTHON_SCRIPT }}"
           }
@@ -87,10 +85,7 @@ jobs:
       - name: Trust Elasticsearch TLS cert on runner (add to LocalMachine\Root)
         shell: powershell
         run: |
-          # This step fetches the server cert from ES and installs into LocalMachine\Root.
-          # Requires admin privileges for the runner process.
           $esUri = '${{ env.ES_URL }}'
-          # Extract host and port
           $uri = [System.Uri]$esUri
           $host = $uri.Host
           $port = if ($uri.IsDefaultPort) { 9200 } else { $uri.Port }
@@ -111,10 +106,10 @@ jobs:
             exit 1
           }
 
-          Write-Host "Installing cert into LocalMachine\\Root ..."
+          Write-Host "Installing cert into LocalMachine\Root ..."
           try {
             certutil -addstore -f Root $tmpCertPath | Write-Host
-            Write-Host "Certificate installed to LocalMachine\\Root"
+            Write-Host "Certificate installed to LocalMachine\Root"
           } catch {
             Write-Warning "certutil failed: $($_.Exception.Message). Trying X509Store fallback..."
             try {
@@ -123,9 +118,9 @@ jobs:
               $store.Open("ReadWrite")
               $store.Add($cert)
               $store.Close()
-              Write-Host "Fallback: certificate added to LocalMachine\\Root via X509Store"
+              Write-Host "Fallback: certificate added to LocalMachine\Root via X509Store"
             } catch {
-              Write-Error "Failed to add certificate to LocalMachine\\Root. Ensure the runner has admin permissions. Error: $($_.Exception.Message)"
+              Write-Error "Failed to add certificate to LocalMachine\Root. Ensure the runner has admin permissions. Error: $($_.Exception.Message)"
               exit 1
             }
           } finally {
