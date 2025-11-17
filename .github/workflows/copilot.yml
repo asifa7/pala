@@ -14,19 +14,19 @@ jobs:
         shell: cmd
 
       - name: Wait for services to be up
-        shell: pwsh
+        shell: powershell
         run: |
           $maxRetries = 5
           $retry = 0
           $success = $false
-
+      
           while ($retry -lt $maxRetries -and -not $success) {
               Write-Host "Checking services (Attempt $($retry + 1))..."
-
+      
               try {
                   $es = Invoke-WebRequest -Uri "https://localhost:9200" -UseBasicParsing -SkipCertificateCheck -Credential (New-Object System.Management.Automation.PSCredential("elastic", (ConvertTo-SecureString "_3Ixrn+I=N6pu_C1IzjW" -AsPlainText -Force)))
                   $kibana = Invoke-WebRequest -Uri "http://localhost:5601/app/home#/" -UseBasicParsing
-
+      
                   if ($es.StatusCode -eq 200 -and $kibana.StatusCode -eq 200) {
                       Write-Host "Both services are up!"
                       $success = $true
@@ -36,16 +36,15 @@ jobs:
               } catch {
                   Write-Host "Services not ready. Retrying..."
                   Start-Sleep -Seconds 10
-                  start "" "C:\scripts\start-services.cmd.cmd"
+                  Start-Process "C:\scripts\start-services.cmd.cmd"
               }
-
+      
               $retry++
           }
-
+      
           if (-not $success) {
               throw "Services failed to start after $maxRetries attempts"
           }
-
       - name: Run FileSystemMonitor
         run: |
           echo "Running FileSystemMonitor.py..."
