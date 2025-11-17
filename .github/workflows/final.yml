@@ -89,7 +89,7 @@ jobs:
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "ES/Kibana not fully ready — continuing anyway."
+            Write-Warning "ES/Kibana not fully ready - continuing anyway."
           }
 
       - name: Setup Python
