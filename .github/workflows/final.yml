@@ -7,6 +7,7 @@ jobs:
   run-on-self-hosted-windows:
     # MUST run on a self-hosted Windows runner on the same machine as ES/Kibana
     runs-on: [self-hosted, windows]
+    
 
     env:
       # Use HTTP since you've exposed services on 0.0.0.0 (no TLS here)
@@ -19,10 +20,16 @@ jobs:
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
+      
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Disable TLS validation globally (PERMANENT for this job)
+        shell: powershell
+        run: |
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          Write-Host "TLS certificate validation is now disabled for this entire job."
 
       - name: Copy start-services script to runner (if present in repo)
         shell: powershell
