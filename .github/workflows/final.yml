@@ -5,10 +5,12 @@ on:
 
 jobs:
   run-on-self-hosted-windows:
+    # MUST run on a self-hosted Windows runner on the same machine as ES/Kibana
     runs-on: [self-hosted, windows]
 
     env:
-      ES_URL: ${{ secrets.ES_URL || 'https://localhost:9200' }}
+      # Use HTTP since you've exposed services on 0.0.0.0 (no TLS here)
+      ES_URL: ${{ secrets.ES_URL || 'http://localhost:9200' }}
       KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || 'elastic' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '_3Ixrn+I=N6pu_C1IzjW' }}
@@ -22,7 +24,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ensure start-services.cmd is present
+      - name: Copy start-services script to runner (if present in repo)
         shell: powershell
         run: |
           $repo = $env:GITHUB_WORKSPACE
@@ -35,10 +37,17 @@ jobs:
             "$repo\start-services.cmd.cmd"
           )
 
-          if (Test-Path $targetScript) { exit 0 }
+          Write-Host "Checking for start-services script in repo and on runner..."
+
+          if (Test-Path $targetScript) {
+            Write-Host "Found existing target script on runner: $targetScript"
+            exit 0
+          }
 
           foreach ($p in $candidates) {
+            Write-Host "Checking $p ..."
             if (Test-Path $p) {
+              Write-Host "Found script at $p; copying to $targetScript"
               if (-not (Test-Path $targetDir)) {
                 New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
               }
@@ -47,49 +56,76 @@ jobs:
             }
           }
 
-          Write-Error "start-services.cmd not found."; exit 1
+          Write-Error "start-services script not found in repo or runner. Place it as scripts/start-services.cmd or start-services.cmd(.cmd)."
+          exit 1
 
-      - name: Launch services script
+      - name: Validate Python script presence (warn only)
         shell: powershell
         run: |
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$env:TARGET_SCRIPT`""
+          if (-not (Test-Path "${{ env.PYTHON_SCRIPT }}")) {
+            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Make sure FileSystemMonitor.py exists at that path on the runner."
+          } else {
+            Write-Host "Python script found: ${{ env.PYTHON_SCRIPT }}"
+          }
+
+      - name: Launch start-services script (detached)
+        shell: powershell
+        run: |
+          $script = "${{ env.TARGET_SCRIPT }}"
+          Write-Host "Launching services script: $script"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal
           Start-Sleep -Seconds 2
+          Write-Host "Launched start script."
 
-      - name: Poll for Elasticsearch & Kibana (TLS disabled)
+      - name: Poll for Elasticsearch & Kibana (verbose)
         shell: powershell
         run: |
-          # Disable TLS certificate validation (safe for local/dev)
-          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-
+          # Verbose poll - accept any HTTP response and print body head
           $esUrl = $env:ES_URL
           $kbUrl = $env:KIBANA_URL
           $retries = [int]$env:POLL_RETRIES
           $interval = [int]$env:POLL_INTERVAL_SECONDS
 
-          Write-Host "Checking ES and Kibana..."
-
+          Write-Host "Starting verbose poll: ES=$esUrl  Kibana=$kbUrl"
           $esUp = $false
           $kbUp = $false
 
-          for ($i=0; $i -lt $retries; $i++) {
+          for ($i = 0; $i -lt $retries; $i++) {
+            Write-Host "`nPoll attempt $($i+1)/$retries"
 
             try {
-              (Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10) | Out-Null
+              $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              Write-Host "ES: Status=$($esResp.StatusCode)"
+              $esBody = $esResp.Content
+              if ($esBody) { Write-Host ("ES body head: " + $esBody.Substring(0,[Math]::Min(500,$esBody.Length))) }
               $esUp = $true
-            } catch {}
+            } catch {
+              Write-Host "ES check failed: $($_.Exception.Message)"
+              $esUp = $false
+            }
 
             try {
-              (Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10) | Out-Null
+              $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              Write-Host "Kibana: Status=$($kbResp.StatusCode)"
+              $kbBody = $kbResp.Content
+              if ($kbBody) { Write-Host ("Kibana body head: " + $kbBody.Substring(0,[Math]::Min(300,$kbBody.Length))) }
               $kbUp = $true
-            } catch {}
+            } catch {
+              Write-Host "Kibana check failed: $($_.Exception.Message)"
+              $kbUp = $false
+            }
 
-            if ($esUp -and $kbUp) { break }
+            if ($esUp -and $kbUp) {
+              Write-Host "Both services reachable. Breaking out of poll loop."
+              break
+            }
 
+            Write-Host "Waiting $interval seconds before next attempt..."
             Start-Sleep -Seconds $interval
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "ES/Kibana not fully ready - continuing anyway."
+            Write-Warning "Timed out waiting for ES/Kibana. Workflow will continue; Python script may fail if services are required."
           }
 
       - name: Setup Python
@@ -97,15 +133,28 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies (if any)
+      - name: Install Python dependencies (if requirements.txt exists)
         shell: powershell
         run: |
           if (Test-Path "requirements.txt") {
+            Write-Host "Installing dependencies from requirements.txt"
             python -m pip install --upgrade pip
             python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt - skipping pip install"
           }
 
-      - name: Run FileSystemMonitor
+      - name: Run FileSystemMonitor Python script
         shell: powershell
+        env:
+          ES_URL: ${{ env.ES_URL }}
+          ES_USERNAME: ${{ env.ES_USERNAME }}
+          ES_PASSWORD: ${{ env.ES_PASSWORD }}
         run: |
-          python "${{ env.PYTHON_SCRIPT }}"
+          $pyScript = '${{ env.PYTHON_SCRIPT }}'
+          if (-not (Test-Path $pyScript)) {
+            Write-Error "Python script not found at $pyScript; aborting."
+            exit 1
+          }
+          Write-Host "Running Python: $pyScript"
+          & python $pyScript
