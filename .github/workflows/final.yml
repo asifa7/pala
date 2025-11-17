@@ -1,0 +1,131 @@
+name: Start ES/Kibana and run FileSystemMonitor
+
+# Manual trigger + you can trigger via API or other workflows
+on:
+  workflow_dispatch:
+
+jobs:
+  run-on-self-hosted-windows:
+    # MUST be a self-hosted Windows runner that runs on the same machine
+    runs-on: [self-hosted, windows]
+
+    env:
+      # Defaults — override via repository Secrets or workflow_dispatch inputs
+      ES_URL: ${{ secrets.ES_URL || 'http://localhost:9200' }}
+      KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
+      ES_USERNAME: ${{ secrets.ES_USERNAME || '' }}
+      ES_PASSWORD: ${{ secrets.ES_PASSWORD || '' }}
+      START_SCRIPT: 'C:\scripts\start-services.cmd'
+      PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
+      # Poll config
+      POLL_RETRIES: 24        # number of polls (24 * POLL_INTERVAL_SECONDS = total wait)
+      POLL_INTERVAL_SECONDS: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate runner & paths
+        shell: pwsh
+        run: |
+          Write-Host "Running on: $env:RUNNER_OS"
+          if (-not (Test-Path $env:START_SCRIPT)) {
+            Write-Error "Start script not found at $env:START_SCRIPT"
+            exit 1
+          }
+          if (-not (Test-Path $env:PYTHON_SCRIPT)) {
+            Write-Warning "Python script not found at $env:PYTHON_SCRIPT - workflow will still attempt to run it later"
+          }
+
+      - name: Launch start-services.cmd (detached)
+        shell: pwsh
+        run: |
+          $script = $env:START_SCRIPT
+          Write-Host "Launching services script: $script"
+          # Start detached process so the job can continue and service windows remain
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal -NoNewWindow:$false -WorkingDirectory (Split-Path $script)
+          Start-Sleep -Seconds 2
+          Write-Host "start-services.cmd launched."
+
+      - name: Poll for Elasticsearch and Kibana readiness
+        shell: pwsh
+        run: |
+          $esUrl = $env:ES_URL
+          $kbUrl = $env:KIBANA_URL
+          $retries = [int]$env:POLL_RETRIES
+          $interval = [int]$env:POLL_INTERVAL_SECONDS
+          $esUp = $false
+          $kbUp = $false
+
+          Write-Host "Polling ES at $esUrl and Kibana at $kbUrl. Max wait: $($retries * $interval) seconds."
+
+          for ($i = 0; $i -lt $retries; $i++) {
+            try {
+              $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              if ($esResp.StatusCode -ge 200 -and $esResp.StatusCode -lt 300) {
+                $esUp = $true
+                Write-Host "Elasticsearch healthy ($($esResp.StatusCode))"
+              } else {
+                Write-Host "Elasticsearch responded with $($esResp.StatusCode)"
+              }
+            } catch {
+              Write-Host "Elasticsearch not ready yet: $($_.Exception.Message)"
+            }
+
+            try {
+              # Kibana may return 302 to login or 200; treat any 2xx/3xx as up
+              $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              if (($kbResp.StatusCode -ge 200 -and $kbResp.StatusCode -lt 400)) {
+                $kbUp = $true
+                Write-Host "Kibana healthy ($($kbResp.StatusCode))"
+              } else {
+                Write-Host "Kibana responded with $($kbResp.StatusCode)"
+              }
+            } catch {
+              Write-Host "Kibana not ready yet: $($_.Exception.Message)"
+            }
+
+            if ($esUp -and $kbUp) {
+              Write-Host "Both services are up. Continuing."
+              break
+            }
+
+            Write-Host "Waiting $interval seconds before next check... ($($i+1)/$retries)"
+            Start-Sleep -Seconds $interval
+          }
+
+          if (-not ($esUp -and $kbUp)) {
+            Write-Warning "Timed out waiting for ES/Kibana to be healthy. Proceeding anyway (you can change POLL_RETRIES/POLL_INTERVAL_SECONDS)."
+          }
+
+      - name: Setup Python (required to run your script)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies (optional)
+        shell: pwsh
+        run: |
+          if (Test-Path "requirements.txt") {
+            Write-Host "requirements.txt found — installing"
+            python -m pip install --upgrade pip
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt present; skipping pip install step"
+          }
+
+      - name: Run FileSystemMonitor Python script
+        shell: pwsh
+        env:
+          ES_URL: ${{ env.ES_URL }}
+          ES_USERNAME: ${{ env.ES_USERNAME }}
+          ES_PASSWORD: ${{ env.ES_PASSWORD }}
+        run: |
+          $pyScript = $env:PYTHON_SCRIPT
+          if (-not (Test-Path $pyScript)) {
+            Write-Error "Python script not found at $pyScript"
+            exit 1
+          }
+          Write-Host "Starting Python script: $pyScript"
+          # Run in same job so logs are captured by the workflow
+          & python $pyScript
