@@ -138,11 +138,11 @@ jobs:
       
           Write-Host "`n-- Attempt to find elasticsearch logs in common locations and show tail (if exists) --"
           $possibleLogs = @(
-            "$env:ProgramFiles\Elastic\Elasticsearch\logs\elasticsearch.log",
-            "$env:ProgramFiles(x86)\Elastic\Elasticsearch\logs\elasticsearch.log",
-            "C:\elasticsearch\logs\elasticsearch.log",
-            "C:\ProgramData\Elastic\Elasticsearch\logs\elasticsearch.log",
-            "C:\elasticsearch-*/logs/elasticsearch.log"
+            "$env:asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
+            "$env:asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
+            "C:\asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
+            "C:\asif pala\elasticsearch-9.1.0\logs\logs\elasticsearch.log",
+            "C:\asif pala\elasticsearch-9.1.0\logs/elasticsearch.log"
           )
           foreach ($plog in $possibleLogs) {
             $paths = @(Get-ChildItem -Path $plog -ErrorAction SilentlyContinue -Force -Recurse | Select-Object -ExpandProperty FullName) 2>$null
