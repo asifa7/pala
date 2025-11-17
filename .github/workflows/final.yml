@@ -29,6 +29,7 @@ jobs:
           $targetDir = "${{ env.TARGET_SCRIPT_DIR }}"
           $targetScript = "${{ env.TARGET_SCRIPT }}"
 
+          # Candidates in repo (common places / accidental double extension)
           $candidates = @(
             "$repo\scripts\start-services.cmd",
             "$repo\start-services.cmd",
@@ -46,7 +47,9 @@ jobs:
           foreach ($p in $candidates) {
             Write-Host "Checking repo candidate: $p"
             if (Test-Path $p) {
+              Write-Host "Found script in repo at: $p"
               if (-not (Test-Path $targetDir)) {
+                Write-Host "Creating target directory: $targetDir"
                 New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
               }
               Copy-Item -Path $p -Destination $targetScript -Force
@@ -57,70 +60,121 @@ jobs:
           }
 
           if (-not $found) {
-            Write-Error "start-services script not found anywhere."
+            Write-Error "start-services script not found in repository. Place it at 'scripts/start-services.cmd' or at repo root."
             exit 1
+          }
+
+      - name: Validate Python script presence (warn only)
+        shell: powershell
+        run: |
+          if (-not (Test-Path "${{ env.PYTHON_SCRIPT }}")) {
+            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Update PYTHON_SCRIPT or place file accordingly."
+          } else {
+            Write-Host "Python script found: ${{ env.PYTHON_SCRIPT }}"
           }
 
       - name: Launch start-services.cmd (detached)
         shell: powershell
         run: |
           $script = "${{ env.TARGET_SCRIPT }}"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal
+          Write-Host "Launching services script: $script"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal -WorkingDirectory (Split-Path $script)
           Start-Sleep -Seconds 2
+          Write-Host "start-services.cmd launched."
 
-      - name: Poll for Elasticsearch & Kibana (IGNORE TLS ERRORS)
+      - name: Trust Elasticsearch TLS cert on runner (add to LocalMachine\Root)
         shell: powershell
         run: |
-          # Disable TLS validation for THIS PS session
-          add-type @"
-          using System.Net;
-          using System.Security.Cryptography.X509Certificates;
-          public class TrustAllCerts {
-          public static bool Ignore(Object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
-          return true;
-    }
-}
-"@
-          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { param($a,$b,$c,$d) return $true }
+          $esUri = '${{ env.ES_URL }}'
+          $uri = [System.Uri]$esUri
+          $esHost = $uri.Host
+          $esPort = if ($uri.IsDefaultPort) { 9200 } else { $uri.Port }
+          $tmpCertPath = Join-Path $env:TEMP ("es_local_cert_{0}.cer" -f ([System.Guid]::NewGuid().ToString()))
 
+          Write-Host "Fetching certificate from $($esHost):$($esPort) ..."
+          try {
+            $tcp = New-Object System.Net.Sockets.TcpClient($esHost, $esPort)
+            $stream = $tcp.GetStream()
+            $ssl = New-Object System.Net.Security.SslStream($stream,$false,({$true}))
+            $ssl.AuthenticateAsClient($esHost)
+            $rawCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+            [System.IO.File]::WriteAllBytes($tmpCertPath, $rawCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            Write-Host "Saved certificate to $tmpCertPath"
+            $tcp.Close()
+          } catch {
+            Write-Warning "Failed to fetch certificate from $($esHost):$($esPort). Error: $($_.Exception.Message)"
+            exit 1
+          }
+
+          Write-Host "Installing cert into LocalMachine\Root ..."
+          try {
+            certutil -addstore -f Root $tmpCertPath | Write-Host
+            Write-Host "Certificate installed to LocalMachine\Root"
+          } catch {
+            Write-Warning "certutil failed: $($_.Exception.Message). Trying X509Store fallback..."
+            try {
+              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($tmpCertPath)
+              $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root","LocalMachine")
+              $store.Open("ReadWrite")
+              $store.Add($cert)
+              $store.Close()
+              Write-Host "Fallback: certificate added to LocalMachine\Root via X509Store"
+            } catch {
+              Write-Error "Failed to add certificate to LocalMachine\Root. Ensure the runner has admin permissions. Error: $($_.Exception.Message)"
+              exit 1
+            }
+          } finally {
+            try { Remove-Item $tmpCertPath -Force -ErrorAction SilentlyContinue } catch {}
+          }
+
+      - name: Poll for Elasticsearch and Kibana readiness
+        shell: powershell
+        run: |
           $esUrl = '${{ env.ES_URL }}'
           $kbUrl = '${{ env.KIBANA_URL }}'
           $retries = [int]${{ env.POLL_RETRIES }}
           $interval = [int]${{ env.POLL_INTERVAL_SECONDS }}
-
-          Write-Host "Polling ES & Kibana with TLS validation DISABLED..."
-
           $esUp = $false
           $kbUp = $false
 
-          for ($i = 0; $i -lt $retries; $i++) {
+          Write-Host "Polling ES at $esUrl and Kibana at $kbUrl. Max wait: $($retries * $interval) seconds."
 
+          for ($i = 0; $i -lt $retries; $i++) {
             try {
               $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "Elasticsearch OK ($($esResp.StatusCode))"
-              $esUp = $true
+              if ($esResp.StatusCode -ge 200 -and $esResp.StatusCode -lt 300) {
+                $esUp = $true
+                Write-Host "Elasticsearch healthy ($($esResp.StatusCode))"
+              } else {
+                Write-Host "Elasticsearch responded with $($esResp.StatusCode)"
+              }
             } catch {
-              Write-Host "Elasticsearch not ready..."
+              Write-Host "Elasticsearch not ready yet: $($_.Exception.Message)"
             }
 
             try {
               $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "Kibana OK ($($kbResp.StatusCode))"
-              $kbUp = $true
+              if (($kbResp.StatusCode -ge 200 -and $kbResp.StatusCode -lt 400)) {
+                $kbUp = $true
+                Write-Host "Kibana healthy ($($kbResp.StatusCode))"
+              } else {
+                Write-Host "Kibana responded with $($kbResp.StatusCode)"
+              }
             } catch {
-              Write-Host "Kibana not ready..."
+              Write-Host "Kibana not ready yet: $($_.Exception.Message)"
             }
 
             if ($esUp -and $kbUp) {
-              Write-Host "Both services ready."
+              Write-Host "Both services are up. Continuing."
               break
             }
 
+            Write-Host "Waiting $interval seconds before next check... ($($i+1)/$retries)"
             Start-Sleep -Seconds $interval
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "Timed out waiting for ES/Kibana — continuing anyway."
+            Write-Warning "Timed out waiting for ES/Kibana to be healthy. Proceeding anyway."
           }
 
       - name: Setup Python
@@ -128,8 +182,28 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run FileSystemMonitor
+      - name: Install Python dependencies (optional)
         shell: powershell
         run: |
+          if (Test-Path "requirements.txt") {
+            Write-Host "requirements.txt found — installing"
+            python -m pip install --upgrade pip
+            python -m pip install -r requirements.txt
+          } else {
+            Write-Host "No requirements.txt present; skipping pip install step"
+          }
+
+      - name: Run FileSystemMonitor Python script
+        shell: powershell
+        env:
+          ES_URL: ${{ env.ES_URL }}
+          ES_USERNAME: ${{ env.ES_USERNAME }}
+          ES_PASSWORD: ${{ env.ES_PASSWORD }}
+        run: |
           $pyScript = '${{ env.PYTHON_SCRIPT }}'
+          if (-not (Test-Path $pyScript)) {
+            Write-Error "Python script not found at $pyScript"
+            exit 1
+          }
+          Write-Host "Starting Python script: $pyScript"
           & python $pyScript
