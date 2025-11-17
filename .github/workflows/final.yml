@@ -8,7 +8,7 @@ jobs:
     runs-on: [self-hosted, windows]
 
     env:
-      ES_URL: ${{ secrets.ES_URL || 'http://localhost:9200' }}
+      ES_URL: ${{ secrets.ES_URL || 'https://localhost:9200' }}
       KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || '' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '' }}
