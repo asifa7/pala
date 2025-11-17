@@ -65,6 +65,97 @@ jobs:
 
           Write-Error "start-services script not found in repo or runner. Place it as scripts/start-services.cmd or start-services.cmd(.cmd)."
           exit 1
+      - name: Diagnose Elasticsearch connectivity (verbose)
+        shell: powershell
+        run: |
+          Write-Host "=== Diagnostic start: ES connectivity ==="
+          $port = 9200
+      
+          Write-Host "`n-- Netstat (listening lines for port $port) --"
+          netstat -ano | Select-String ":$port" | ForEach-Object { Write-Host $_ }
+      
+          Write-Host "`n-- Find processes with port $port (netstat -> PID -> tasklist) --"
+          $lines = netstat -ano | Select-String ":$port"
+          $pids = @()
+          foreach ($l in $lines) {
+            $parts = ($l -split '\s+') | Where-Object { $_ -ne '' }
+            if ($parts.Length -ge 5) {
+              $pid = $parts[-1]
+              if ($pid -and (-not ($pids -contains $pid))) { $pids += $pid }
+            }
+          }
+          if ($pids.Count -eq 0) {
+            Write-Host "No PIDs found listening on port $port."
+          } else {
+            foreach ($pid in $pids) {
+              Write-Host "PID $pid ->"
+              try { tasklist /FI "PID eq $pid" | ForEach-Object { Write-Host "  $_" } } catch {}
+              try { (Get-Process -Id [int]$pid -ErrorAction SilentlyContinue) | Format-List Id, ProcessName, Path } catch {}
+            }
+          }
+      
+          Write-Host "`n-- Candidate host addresses to test --"
+          $candidates = @('localhost','127.0.0.1')
+          try {
+            $hn = $env:COMPUTERNAME
+            if ($hn) { $candidates += $hn }
+          } catch {}
+          try {
+            $ips = Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin DHCP,Manual -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' } | Select-Object -ExpandProperty IPAddress
+            if (-not $ips) { $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' } | Select-Object -ExpandProperty IPAddress }
+            foreach ($ip in $ips) { if ($ip -and (-not ($candidates -contains $ip))) { $candidates += $ip } }
+          } catch {}
+      
+          Write-Host "Candidates: $($candidates -join ', ')"
+      
+          foreach ($host in $candidates) {
+            Write-Host "`n--- Testing $host:$port ---"
+            try {
+              Write-Host "Test-NetConnection (TCP):"
+              $tnc = Test-NetConnection -ComputerName $host -Port $port -InformationLevel Detailed -ErrorAction SilentlyContinue
+              $tnc | Format-List | ForEach-Object { Write-Host "  $_" }
+            } catch { Write-Host "  Test-NetConnection error: $($_.Exception.Message)" }
+      
+            try {
+              Write-Host "Invoke-WebRequest (first 500 chars or error):"
+              $url = "http://$host:$port"
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+              Write-Host "  Status: $($resp.StatusCode)"
+              $body = $resp.Content
+              if ($body) {
+                $head = $body.Substring(0,[Math]::Min(500,$body.Length))
+                Write-Host "  Body head:`n$head"
+              }
+            } catch {
+              Write-Host "  Invoke-WebRequest failed: $($_.Exception.Message)"
+            }
+          }
+      
+          Write-Host "`n-- Check Java / elasticsearch processes (likely java.exe) --"
+          try {
+            Get-Process java -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path, StartTime | ForEach-Object { Write-Host $_ }
+          } catch {}
+      
+          Write-Host "`n-- Attempt to find elasticsearch logs in common locations and show tail (if exists) --"
+          $possibleLogs = @(
+            "$env:ProgramFiles\Elastic\Elasticsearch\logs\elasticsearch.log",
+            "$env:ProgramFiles(x86)\Elastic\Elasticsearch\logs\elasticsearch.log",
+            "C:\elasticsearch\logs\elasticsearch.log",
+            "C:\ProgramData\Elastic\Elasticsearch\logs\elasticsearch.log",
+            "C:\elasticsearch-*/logs/elasticsearch.log"
+          )
+          foreach ($plog in $possibleLogs) {
+            $paths = @(Get-ChildItem -Path $plog -ErrorAction SilentlyContinue -Force -Recurse | Select-Object -ExpandProperty FullName) 2>$null
+            foreach ($p in $paths) {
+              Write-Host "`n--- Log tail: $p ---"
+              try {
+                Get-Content -Path $p -Tail 200 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+              } catch { Write-Host "  Cannot read log $p: $($_.Exception.Message)" }
+            }
+          }
+      
+          Write-Host "`n=== Diagnostic end ==="
+      
 
       - name: Validate Python script presence (warn only)
         shell: powershell
