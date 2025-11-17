@@ -5,225 +5,101 @@ on:
 
 jobs:
   run-on-self-hosted-windows:
-    # MUST run on a self-hosted Windows runner on the same machine as ES/Kibana
     runs-on: [self-hosted, windows]
-    
 
     env:
-      # Use HTTP since you've exposed services on 0.0.0.0 (no TLS here)
-      ES_URL: ${{ secrets.ES_URL || 'https://localhost:9200' }}
-      KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
-      ES_USERNAME: ${{ secrets.ES_USERNAME || 'elastic' }}
-      ES_PASSWORD: ${{ secrets.ES_PASSWORD || '_3Ixrn+I=N6pu_C1IzjW' }}
-      TARGET_SCRIPT_DIR: 'C:\scripts'
-      TARGET_SCRIPT: 'C:\scripts\start-services.cmd.cmd'
+      ES_URL: 'https://localhost:9200'
+      KIBANA_URL: 'http://localhost:5601'
+      ES_USERNAME: 'elastic'
+      ES_PASSWORD: '_3Ixrn+I=N6pu_C1IzjW'
+      ELASTIC_HOME: 'C:\asif pala\elasticsearch-9.1.0'
+      KIBANA_HOME: 'C:\asif pala\kibana-9.1.0-windows-x86_64'
       PYTHON_SCRIPT: 'C:\FileSystemMonitor\FileSystemMonitor.py'
       POLL_RETRIES: 24
       POLL_INTERVAL_SECONDS: 30
-      
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Disable TLS validation globally (PERMANENT for this job)
+
+      - name: Disable TLS validation globally (job-wide)
         shell: powershell
         run: |
+          # disable TLS cert checks for this job (dev/local use only)
           [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-          Write-Host "TLS certificate validation is now disabled for this entire job."
+          Write-Host "TLS certificate validation disabled for this job."
 
-      - name: Copy start-services script to runner (if present in repo)
+      - name: Start Elasticsearch (detached)
         shell: powershell
         run: |
-          $repo = $env:GITHUB_WORKSPACE
-          $targetDir = "${{ env.TARGET_SCRIPT_DIR }}"
-          $targetScript = "${{ env.TARGET_SCRIPT }}"
-
-          $candidates = @(
-            "$repo\scripts\start-services.cmd",
-            "$repo\start-services.cmd",
-            "$repo\start-services.cmd.cmd"
-          )
-
-          Write-Host "Checking for start-services script in repo and on runner..."
-
-          if (Test-Path $targetScript) {
-            Write-Host "Found existing target script on runner: $targetScript"
-            exit 0
+          $esBat = "${{ env.ELASTIC_HOME }}\bin\elasticsearch.bat"
+          if (-not (Test-Path $esBat)) {
+            Write-Error "Elasticsearch batch not found at $esBat"
+            exit 1
           }
+          Write-Host "Starting Elasticsearch: $esBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$esBat`"" -WindowStyle Normal
+          Start-Sleep -Seconds 3
+          Write-Host "Elasticsearch start command issued."
 
-          foreach ($p in $candidates) {
-            Write-Host "Checking $p ..."
-            if (Test-Path $p) {
-              Write-Host "Found script at $p; copying to $targetScript"
-              if (-not (Test-Path $targetDir)) {
-                New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
-              }
-              Copy-Item -Path $p -Destination $targetScript -Force
-              exit 0
-            }
-          }
-
-          Write-Error "start-services script not found in repo or runner. Place it as scripts/start-services.cmd or start-services.cmd(.cmd)."
-          exit 1
-      - name: Diagnose Elasticsearch connectivity (verbose)
+      - name: Start Kibana (detached)
         shell: powershell
         run: |
-          Write-Host "=== Diagnostic start: ES connectivity ==="
-          $port = 9200
-      
-          Write-Host "`n-- Netstat (listening lines for port $port) --"
-          netstat -ano | Select-String ":$port" | ForEach-Object { Write-Host $_ }
-      
-          Write-Host "`n-- Find processes with port $port (netstat -> PID -> tasklist) --"
-          $lines = netstat -ano | Select-String ":$port"
-          $pids = @()
-          foreach ($l in $lines) {
-            $parts = ($l -split '\s+') | Where-Object { $_ -ne '' }
-            if ($parts.Length -ge 5) {
-              $pid = $parts[-1]
-              if ($pid -and (-not ($pids -contains $pid))) { $pids += $pid }
-            }
+          $kibBat = "${{ env.KIBANA_HOME }}\bin\kibana.bat"
+          if (-not (Test-Path $kibBat)) {
+            Write-Error "Kibana batch not found at $kibBat"
+            exit 1
           }
-          if ($pids.Count -eq 0) {
-            Write-Host "No PIDs found listening on port $port."
-          } else {
-            foreach ($pid in $pids) {
-              Write-Host "PID $pid ->"
-              try { tasklist /FI "PID eq $pid" | ForEach-Object { Write-Host "  $_" } } catch {}
-              try { (Get-Process -Id [int]$pid -ErrorAction SilentlyContinue) | Format-List Id, ProcessName, Path } catch {}
-            }
-          }
-      
-          Write-Host "`n-- Candidate host addresses to test --"
-          $candidates = @('localhost','127.0.0.1')
-          try {
-            $hn = $env:COMPUTERNAME
-            if ($hn) { $candidates += $hn }
-          } catch {}
-          try {
-            $ips = Get-NetIPAddress -AddressFamily IPv4 -PrefixOrigin DHCP,Manual -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' } | Select-Object -ExpandProperty IPAddress
-            if (-not $ips) { $ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' } | Select-Object -ExpandProperty IPAddress }
-            foreach ($ip in $ips) { if ($ip -and (-not ($candidates -contains $ip))) { $candidates += $ip } }
-          } catch {}
-      
-          Write-Host "Candidates: $($candidates -join ', ')"
-      
-          foreach ($host in $candidates) {
-            Write-Host "`n--- Testing $host:$port ---"
-            try {
-              Write-Host "Test-NetConnection (TCP):"
-              $tnc = Test-NetConnection -ComputerName $host -Port $port -InformationLevel Detailed -ErrorAction SilentlyContinue
-              $tnc | Format-List | ForEach-Object { Write-Host "  $_" }
-            } catch { Write-Host "  Test-NetConnection error: $($_.Exception.Message)" }
-      
-            try {
-              Write-Host "Invoke-WebRequest (first 500 chars or error):"
-              $url = "http://$host:$port"
-              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-              Write-Host "  Status: $($resp.StatusCode)"
-              $body = $resp.Content
-              if ($body) {
-                $head = $body.Substring(0,[Math]::Min(500,$body.Length))
-                Write-Host "  Body head:`n$head"
-              }
-            } catch {
-              Write-Host "  Invoke-WebRequest failed: $($_.Exception.Message)"
-            }
-          }
-      
-          Write-Host "`n-- Check Java / elasticsearch processes (likely java.exe) --"
-          try {
-            Get-Process java -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, Path, StartTime | ForEach-Object { Write-Host $_ }
-          } catch {}
-      
-          Write-Host "`n-- Attempt to find elasticsearch logs in common locations and show tail (if exists) --"
-          $possibleLogs = @(
-            "$env:asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
-            "$env:asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
-            "C:\asif pala\elasticsearch-9.1.0\logs\elasticsearch.log",
-            "C:\asif pala\elasticsearch-9.1.0\logs\logs\elasticsearch.log",
-            "C:\asif pala\elasticsearch-9.1.0\logs/elasticsearch.log"
-          )
-          foreach ($plog in $possibleLogs) {
-            $paths = @(Get-ChildItem -Path $plog -ErrorAction SilentlyContinue -Force -Recurse | Select-Object -ExpandProperty FullName) 2>$null
-            foreach ($p in $paths) {
-              Write-Host "`n--- Log tail: $p ---"
-              try {
-                Get-Content -Path $p -Tail 200 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-              } catch { Write-Host "  Cannot read log $p: $($_.Exception.Message)" }
-            }
-          }
-      
-          Write-Host "`n=== Diagnostic end ==="
-      
-
-      - name: Validate Python script presence (warn only)
-        shell: powershell
-        run: |
-          if (-not (Test-Path "${{ env.PYTHON_SCRIPT }}")) {
-            Write-Warning "Python script not found at ${{ env.PYTHON_SCRIPT }}. Make sure FileSystemMonitor.py exists at that path on the runner."
-          } else {
-            Write-Host "Python script found: ${{ env.PYTHON_SCRIPT }}"
-          }
-
-      - name: Launch start-services script (detached)
-        shell: powershell
-        run: |
-          $script = "${{ env.TARGET_SCRIPT }}"
-          Write-Host "Launching services script: $script"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$script`"" -WindowStyle Normal
-          Start-Sleep -Seconds 2
-          Write-Host "Launched start script."
+          Write-Host "Starting Kibana: $kibBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$kibBat`"" -WindowStyle Normal
+          Start-Sleep -Seconds 3
+          Write-Host "Kibana start command issued."
 
       - name: Poll for Elasticsearch & Kibana (verbose)
         shell: powershell
         run: |
-          # Verbose poll - accept any HTTP response and print body head
           $esUrl = $env:ES_URL
           $kbUrl = $env:KIBANA_URL
           $retries = [int]$env:POLL_RETRIES
           $interval = [int]$env:POLL_INTERVAL_SECONDS
 
-          Write-Host "Starting verbose poll: ES=$esUrl  Kibana=$kbUrl"
+          Write-Host "Polling ES=$esUrl  Kibana=$kbUrl (max $retries attempts, $interval sec interval)"
           $esUp = $false
           $kbUp = $false
 
-          for ($i = 0; $i -lt $retries; $i++) {
-            Write-Host "`nPoll attempt $($i+1)/$retries"
+          for ($i=0; $i -lt $retries; $i++) {
+            Write-Host ""
+            Write-Host ("Attempt {0}/{1}" -f ($i+1), $retries)
 
             try {
               $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "ES: Status=$($esResp.StatusCode)"
-              $esBody = $esResp.Content
-              if ($esBody) { Write-Host ("ES body head: " + $esBody.Substring(0,[Math]::Min(500,$esBody.Length))) }
+              Write-Host ("Elasticsearch: HTTP " + $esResp.StatusCode)
               $esUp = $true
             } catch {
-              Write-Host "ES check failed: $($_.Exception.Message)"
+              Write-Host ("Elasticsearch check failed: " + $_.Exception.Message)
               $esUp = $false
             }
 
             try {
               $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host "Kibana: Status=$($kbResp.StatusCode)"
-              $kbBody = $kbResp.Content
-              if ($kbBody) { Write-Host ("Kibana body head: " + $kbBody.Substring(0,[Math]::Min(300,$kbBody.Length))) }
+              Write-Host ("Kibana: HTTP " + $kbResp.StatusCode)
               $kbUp = $true
             } catch {
-              Write-Host "Kibana check failed: $($_.Exception.Message)"
+              Write-Host ("Kibana check failed: " + $_.Exception.Message)
               $kbUp = $false
             }
 
             if ($esUp -and $kbUp) {
-              Write-Host "Both services reachable. Breaking out of poll loop."
+              Write-Host "Both services reachable. Continuing."
               break
             }
 
-            Write-Host "Waiting $interval seconds before next attempt..."
+            Write-Host ("Waiting {0} seconds before next attempt..." -f $interval)
             Start-Sleep -Seconds $interval
           }
 
           if (-not ($esUp -and $kbUp)) {
-            Write-Warning "Timed out waiting for ES/Kibana. Workflow will continue; Python script may fail if services are required."
+            Write-Warning "Timeout waiting for ES/Kibana. Workflow will continue but python script may fail."
           }
 
       - name: Setup Python
@@ -235,11 +111,11 @@ jobs:
         shell: powershell
         run: |
           if (Test-Path "requirements.txt") {
-            Write-Host "Installing dependencies from requirements.txt"
+            Write-Host "Installing Python dependencies"
             python -m pip install --upgrade pip
             python -m pip install -r requirements.txt
           } else {
-            Write-Host "No requirements.txt - skipping pip install"
+            Write-Host "No requirements.txt found - skipping pip install"
           }
 
       - name: Run FileSystemMonitor Python script
@@ -249,10 +125,10 @@ jobs:
           ES_USERNAME: ${{ env.ES_USERNAME }}
           ES_PASSWORD: ${{ env.ES_PASSWORD }}
         run: |
-          $pyScript = '${{ env.PYTHON_SCRIPT }}'
+          $pyScript = "${{ env.PYTHON_SCRIPT }}"
           if (-not (Test-Path $pyScript)) {
-            Write-Error "Python script not found at $pyScript; aborting."
+            Write-Error "Python script not found at $pyScript"
             exit 1
           }
-          Write-Host "Running Python: $pyScript"
+          Write-Host "Running Python script: $pyScript"
           & python $pyScript
