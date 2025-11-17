@@ -87,22 +87,22 @@ jobs:
         run: |
           $esUri = '${{ env.ES_URL }}'
           $uri = [System.Uri]$esUri
-          $host = $uri.Host
-          $port = if ($uri.IsDefaultPort) { 9200 } else { $uri.Port }
+          $esHost = $uri.Host
+          $esPort = if ($uri.IsDefaultPort) { 9200 } else { $uri.Port }
           $tmpCertPath = Join-Path $env:TEMP ("es_local_cert_{0}.cer" -f ([System.Guid]::NewGuid().ToString()))
 
-          Write-Host "Fetching certificate from $($host):$($port) ..."
+          Write-Host "Fetching certificate from $($esHost):$($esPort) ..."
           try {
-            $tcp = New-Object System.Net.Sockets.TcpClient($host, $port)
+            $tcp = New-Object System.Net.Sockets.TcpClient($esHost, $esPort)
             $stream = $tcp.GetStream()
             $ssl = New-Object System.Net.Security.SslStream($stream,$false,({$true}))
-            $ssl.AuthenticateAsClient($host)
+            $ssl.AuthenticateAsClient($esHost)
             $rawCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
             [System.IO.File]::WriteAllBytes($tmpCertPath, $rawCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
             Write-Host "Saved certificate to $tmpCertPath"
             $tcp.Close()
           } catch {
-            Write-Warning "Failed to fetch certificate from $($host):$($port). Error: $($_.Exception.Message)"
+            Write-Warning "Failed to fetch certificate from $($esHost):$($esPort). Error: $($_.Exception.Message)"
             exit 1
           }
 
