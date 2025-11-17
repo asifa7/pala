@@ -9,7 +9,7 @@ jobs:
 
     env:
       ES_URL: ${{ secrets.ES_URL || 'https://localhost:9200' }}
-      KIBANA_URL: ${{ secrets.KIBANA_URL || 'https://localhost:5601' }}
+      KIBANA_URL: ${{ secrets.KIBANA_URL || 'http://localhost:5601' }}
       ES_USERNAME: ${{ secrets.ES_USERNAME || 'elastic' }}
       ES_PASSWORD: ${{ secrets.ES_PASSWORD || '_3Ixrn+I=N6pu_C1IzjW' }}
       TARGET_SCRIPT_DIR: 'C:\scripts'
@@ -91,7 +91,7 @@ jobs:
           $port = if ($uri.IsDefaultPort) { 9200 } else { $uri.Port }
           $tmpCertPath = Join-Path $env:TEMP ("es_local_cert_{0}.cer" -f ([System.Guid]::NewGuid().ToString()))
 
-          Write-Host "Fetching certificate from $host:$port ..."
+          Write-Host "Fetching certificate from $($host):$($port) ..."
           try {
             $tcp = New-Object System.Net.Sockets.TcpClient($host, $port)
             $stream = $tcp.GetStream()
@@ -102,7 +102,7 @@ jobs:
             Write-Host "Saved certificate to $tmpCertPath"
             $tcp.Close()
           } catch {
-            Write-Warning "Failed to fetch certificate from $host:$port. Error: $($_.Exception.Message)"
+            Write-Warning "Failed to fetch certificate from $($host):$($port). Error: $($_.Exception.Message)"
             exit 1
           }
 
