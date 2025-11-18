@@ -1,52 +1,126 @@
-name: Start and Monitor Services
+name: Start and check Elasticsearch & Kibana
 
 on:
   workflow_dispatch:
 
 jobs:
-  monitor:
-    runs-on: self-hosted
-    steps:
-      - name: Start services
-        run: |
-          echo "Starting services..."
-          start "" "C:\scripts\start-services.cmd.cmd"
-        shell: cmd
+  start-and-check:
+    runs-on: [self-hosted, windows]
+    env:
+      ES_USER: elastic
+      ES_PASS: 3Ixrn+I=N6pu_C1IzjW
+      ES_URL: 'http://localhost:9200'
+      KIBANA_URL: 'http://localhost:5601'
+      POLL_RETRIES: 24
+      POLL_INTERVAL_SECONDS: 30
 
-      - name: Wait for services to be up
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Disable TLS validation for job (dev only)
         shell: powershell
         run: |
-          $maxRetries = 5
-          $retry = 0
-          $success = $false
-      
-          while ($retry -lt $maxRetries -and -not $success) {
-              Write-Host "Checking services (Attempt $($retry + 1))..."
-      
-              try {
-                  $es = Invoke-WebRequest -Uri "https://localhost:9200" -UseBasicParsing -SkipCertificateCheck -Credential (New-Object System.Management.Automation.PSCredential("elastic", (ConvertTo-SecureString "_3Ixrn+I=N6pu_C1IzjW" -AsPlainText -Force)))
-                  $kibana = Invoke-WebRequest -Uri "http://localhost:5601/app/home#/" -UseBasicParsing
-      
-                  if ($es.StatusCode -eq 200 -and $kibana.StatusCode -eq 200) {
-                      Write-Host "Both services are up!"
-                      $success = $true
-                  } else {
-                      throw "One or both services not ready"
-                  }
-              } catch {
-                  Write-Host "Services not ready. Retrying..."
-                  Start-Sleep -Seconds 10
-                  Start-Process "C:\scripts\start-services.cmd.cmd"
-              }
-      
-              $retry++
-          }
-      
-          if (-not $success) {
-              throw "Services failed to start after $maxRetries attempts"
-          }
-      - name: Run FileSystemMonitor
+          [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+          Write-Host "TLS certificate validation disabled for this job."
+
+      - name: Find elasticsearch.bat and kibana.bat (search)
+        shell: powershell
         run: |
-          echo "Running FileSystemMonitor.py..."
-          python "C:\FileSystemMonitor\FileSystemMonitor.py"
-        shell: cmd
+          $searchRoot = 'C:\asif pala'
+          if (-not (Test-Path $searchRoot)) { $searchRoot = 'C:\' }
+
+          Write-Host "Searching for bat files under: $searchRoot"
+          $esBat = Get-ChildItem -Path $searchRoot -Filter 'elasticsearch.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          $kibBat = Get-ChildItem -Path $searchRoot -Filter 'kibana.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+
+          Write-Host "elasticsearch.bat => $esBat"
+          Write-Host "kibana.bat       => $kibBat"
+
+          if ($esBat) { "ES_BAT=$esBat" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          if ($kibBat) { "KIB_BAT=$kibBat" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+
+      - name: Start Elasticsearch (if found)
+        shell: powershell
+        run: |
+          if (-not $env:ES_BAT) {
+            Write-Warning "No elasticsearch.bat found; skipping ES start."
+            exit 0
+          }
+          $esBat = $env:ES_BAT
+          Write-Host "Starting Elasticsearch (detached) from: $esBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$esBat`"" -WindowStyle Hidden
+          Start-Sleep -Seconds 4
+          Write-Host "Elasticsearch start command issued."
+
+      - name: Start Kibana (if found)
+        shell: powershell
+        run: |
+          if (-not $env:KIB_BAT) {
+            Write-Warning "No kibana.bat found; skipping Kibana start."
+            exit 0
+          }
+          $kibBat = $env:KIB_BAT
+          Write-Host "Starting Kibana (detached) from: $kibBat"
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$kibBat`"" -WindowStyle Hidden
+          Start-Sleep -Seconds 4
+          Write-Host "Kibana start command issued."
+
+      - name: Poll ES & Kibana (auth for ES)
+        shell: powershell
+        run: |
+          $esUrl = $env:ES_URL
+          $kbUrl = $env:KIBANA_URL
+          $retries = [int]$env:POLL_RETRIES
+          $interval = [int]$env:POLL_INTERVAL_SECONDS
+
+          # prepare basic auth header for ES
+          $pair = "$($env:ES_USER):$($env:ES_PASS)"
+          $b = [System.Text.Encoding]::ASCII.GetBytes($pair)
+          $auth = [Convert]::ToBase64String($b)
+          $headers = @{ Authorization = "Basic $auth" }
+
+          Write-Host "Polling ES ($esUrl) and Kibana ($kbUrl) - up to $retries attempts..."
+
+          $esUp = $false
+          $kbUp = $false
+
+          for ($i = 0; $i -lt $retries; $i++) {
+            Write-Host ""
+            Write-Host ("Attempt {0}/{1}" -f ($i+1), $retries)
+
+            try {
+              $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -Headers $headers -TimeoutSec 10 -ErrorAction Stop
+              Write-Host ("Elasticsearch: HTTP " + $esResp.StatusCode)
+              $esUp = $true
+            } catch {
+              Write-Host ("Elasticsearch check failed: " + $_.Exception.Message)
+              $esUp = $false
+            }
+
+            try {
+              $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              Write-Host ("Kibana: HTTP " + $kbResp.StatusCode)
+              $kbUp = $true
+            } catch {
+              Write-Host ("Kibana check failed: " + $_.Exception.Message)
+              $kbUp = $false
+            }
+
+            if ($esUp -and $kbUp) {
+              Write-Host "Both services reachable."
+              break
+            }
+
+            Start-Sleep -Seconds $interval
+          }
+
+          if (-not ($esUp -and $kbUp)) {
+            Write-Warning "Timed out waiting for ES/Kibana. Check services/logs on the host."
+            exit 1
+          }
+
+      - name: Success - services are up
+        shell: powershell
+        run: |
+          Write-Host "Elasticsearch and Kibana are reachable. Workflow completed successfully."
