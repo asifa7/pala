@@ -26,98 +26,74 @@ jobs:
           [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
           Write-Host "TLS validation disabled for job."
 
-      - name: Find Elasticsearch and Kibana batch files (search & report)
+      - name: Search ES/Kibana batch files
         shell: powershell
         run: |
-          # prefer searching under C:\asif pala if present to speed up search
-          $searchRoot = 'C:\asif pala'
-          if (-not (Test-Path $searchRoot)) { $searchRoot = 'C:\' }
+          $root = 'C:\asif pala'
+          if (-not (Test-Path $root)) { $root = 'C:\' }
 
-          Write-Host "Searching for elasticsearch.bat and kibana.bat under: $searchRoot"
-          $esBatPath = Get-ChildItem -Path $searchRoot -Filter 'elasticsearch.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          $kibBatPath = Get-ChildItem -Path $searchRoot -Filter 'kibana.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          $es = Get-ChildItem -Path $root -Filter 'elasticsearch.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          $kb = Get-ChildItem -Path $root -Filter 'kibana.bat' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 
-          Write-Host "elasticsearch.bat => $esBatPath"
-          Write-Host "kibana.bat       => $kibBatPath"
+          Write-Host "elasticsearch.bat => $es"
+          Write-Host "kibana.bat       => $kb"
 
-          if (-not $esBatPath) { Write-Warning "elasticsearch.bat not found under $searchRoot" }
-          if (-not $kibBatPath) { Write-Warning "kibana.bat not found under $searchRoot" }
+          if ($es) { "ES_BAT=$es" | Out-File -FilePath $env:GITHUB_ENV -Append }
+          if ($kb) { "KIB_BAT=$kb" | Out-File -FilePath $env:GITHUB_ENV -Append }
 
-          # Export to job environment file for later steps
-          if ($esBatPath) { "`nES_BAT=$esBatPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
-          if ($kibBatPath) { "`nKIB_BAT=$kibBatPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
-
-      - name: Start Elasticsearch if found (detached)
+      - name: Start Elasticsearch (even if broken, optional)
         shell: powershell
         run: |
           if (-not $env:ES_BAT) {
-            Write-Warning "ES batch path not set; skipping ES start step."
+            Write-Warning "Elasticsearch bat not found — skipping"
             exit 0
           }
-          $esBat = $env:ES_BAT
-          Write-Host "Starting Elasticsearch from: $esBat"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$esBat`"" -WindowStyle Hidden
-          Start-Sleep -Seconds 4
-          Write-Host "Elasticsearch start command issued."
+          Start-Process "cmd.exe" "/c `"$env:ES_BAT`"" -WindowStyle Hidden
+          Write-Host "Elasticsearch start issued (ignoring health)."
 
-      - name: Start Kibana if found (detached)
+      - name: Start Kibana (required)
         shell: powershell
         run: |
           if (-not $env:KIB_BAT) {
-            Write-Warning "Kibana batch path not set; skipping Kibana start step."
-            exit 0
+            Write-Error "Kibana bat NOT found — cannot continue."
+            exit 1
           }
-          $kibBat = $env:KIB_BAT
-          Write-Host "Starting Kibana from: $kibBat"
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$kibBat`"" -WindowStyle Hidden
-          Start-Sleep -Seconds 4
-          Write-Host "Kibana start command issued."
+          Start-Process "cmd.exe" "/c `"$env:KIB_BAT`"" -WindowStyle Hidden
+          Write-Host "Kibana start issued."
 
-      - name: Poll for Elasticsearch & Kibana (verbose)
+      - name: Poll ONLY Kibana (Elasticsearch ignored)
         shell: powershell
         run: |
-          $esUrl = $env:ES_URL
-          $kbUrl = $env:KIBANA_URL
+          $url = $env:KIBANA_URL
           $retries = [int]$env:POLL_RETRIES
           $interval = [int]$env:POLL_INTERVAL_SECONDS
 
-          Write-Host "Polling ES=$esUrl  Kibana=$kbUrl (max $retries attempts, $interval sec interval)"
-          $esUp = $false
-          $kbUp = $false
+          Write-Host "Polling ONLY Kibana at $url..."
 
-          for ($i=0; $i -lt $retries; $i++) {
-            Write-Host ""
-            Write-Host ("Attempt {0}/{1}" -f ($i+1), $retries)
+          for ($i=1; $i -le $retries; $i++) {
+            Write-Host "Attempt $i/$retries..."
 
             try {
-              $esResp = Invoke-WebRequest -Uri $esUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host ("Elasticsearch: HTTP " + $esResp.StatusCode)
-              $esUp = $true
-            } catch {
-              Write-Host ("Elasticsearch check failed: " + $_.Exception.Message)
-              $esUp = $false
-            }
-
-            try {
-              $kbResp = Invoke-WebRequest -Uri $kbUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-              Write-Host ("Kibana: HTTP " + $kbResp.StatusCode)
-              $kbUp = $true
-            } catch {
-              Write-Host ("Kibana check failed: " + $_.Exception.Message)
-              $kbUp = $false
-            }
-
-            if ($esUp -and $kbUp) {
-              Write-Host "Both services reachable. Continuing."
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+              Write-Host "Kibana OK: HTTP $($resp.StatusCode)"
+              Write-Host "Kibana is UP — continuing."
               break
             }
+            catch {
+              Write-Host "Kibana not ready: $($_.Exception.Message)"
+            }
 
-            Write-Host ("Waiting {0} seconds before next attempt..." -f $interval)
             Start-Sleep -Seconds $interval
           }
 
-          if (-not ($esUp -and $kbUp)) {
-            Write-Warning "Timeout waiting for ES/Kibana. Workflow will continue but python script may fail."
+          # After retries, if still not up → fail
+          try {
+            $test = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+            Write-Host "Kibana confirmed UP."
+          }
+          catch {
+            Write-Error "Kibana NEVER became available. Stopping workflow."
+            exit 1
           }
 
       - name: Setup Python
@@ -125,24 +101,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies (if requirements.txt exists)
-        shell: powershell
-        run: |
-          if (Test-Path "requirements.txt") {
-            Write-Host "Installing Python dependencies"
-            python -m pip install --upgrade pip
-            python -m pip install -r requirements.txt
-          } else {
-            Write-Host "No requirements.txt found - skipping pip install"
-          }
-
       - name: Run FileSystemMonitor Python script
         shell: powershell
         run: |
-          $pyScript = "${{ env.PYTHON_SCRIPT }}"
-          if (-not (Test-Path $pyScript)) {
-            Write-Error "Python script not found at $pyScript; aborting."
+          $py = $env:PYTHON_SCRIPT
+          if (-not (Test-Path $py)) {
+            Write-Error "Python script not found at $py"
             exit 1
           }
-          Write-Host "Running Python script: $pyScript"
-          & python $pyScript
+          Write-Host "Running Python script..."
+          & python $py
